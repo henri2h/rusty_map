@@ -1,0 +1,48 @@
+[package]
+name = "rusty_map"
+version = "0.1.0"
+edition = "2024"
+
+# For profiling
+[profile.release]
+debug = true
+split-debuginfo = "off"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[features]
+hotreload = ["freya/hotreload"]
+
+[dependencies]
+freya = { path = "../freya/crates/freya", features = [
+  "engine",
+  "material-design",
+  "icons",
+] }
+freya-icons = { path = "../freya/crates/freya-icons", features = ["lucide"] }
+freya-router = { path = "../freya/crates/freya-router" }
+torin = { path = "../freya/crates/torin" }
+
+
+reqwest = { version = "0.12", features = [
+  "rustls-tls",
+], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["clock"] }
+dirs = "6"
+lru = "0.14"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+env_logger = "0.11"
+robius-directories = { git = "https://github.com/project-robius/robius" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+freya-android = { path = "../freya/crates/freya-android" }
+freya-winit = { path = "../freya/crates/freya-winit" }
+android_logger = "0.15"
+winit = { version = "0.30", features = ["android-native-activity", "rwh_06"] }
+robius-location = { git = "https://github.com/project-robius/robius" }
