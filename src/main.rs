@@ -1,6 +1,7 @@
 pub mod components;
 pub mod pages;
 pub mod route;
+pub mod utils;
 
 use freya::prelude::*;
 use freya_router::prelude::{Router, RouterConfig};

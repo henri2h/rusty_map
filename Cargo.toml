@@ -20,12 +20,14 @@ freya = { path = "../freya/crates/freya", features = [
   "engine",
   "material-design",
   "icons",
+  "query",
 ] }
 freya-icons = { path = "../freya/crates/freya-icons", features = ["lucide"] }
 freya-router = { path = "../freya/crates/freya-router" }
 torin = { path = "../freya/crates/torin" }
 
 
+mvt-reader = "2.4.0"
 reqwest = { version = "0.12", features = [
   "rustls-tls",
 ], default-features = false }
