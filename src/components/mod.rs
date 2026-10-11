@@ -1,2 +1,3 @@
-pub mod map_component;
-mod tile;
+pub mod place;
+pub mod search;
+mod wikipedia;
