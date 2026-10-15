@@ -62,7 +62,7 @@ const LINE_PADDING_PX: f32 = 8.0;
 const FADE_IN: time::Duration = time::Duration::from_millis(150);
 const FADE_OUT: time::Duration = time::Duration::from_millis(220);
 
-/// POI icons only make sense at street-level zooms.
+/// POI icons only make sense at street-level zooms. Default for `StyleSpec::icon_min_zoom`.
 pub const ICON_MIN_ZOOM: f64 = 14.0;
 
 /// On-screen icon size (sprites are 32px sources).

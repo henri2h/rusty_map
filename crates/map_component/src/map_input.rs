@@ -8,9 +8,10 @@ use crate::style::StyleSpec;
 use super::map_paint::FRAME_BUDGET;
 use super::util::renderer::Properties;
 use super::util::{
-    cache::{TileCache, ZoomDepCache, ensure_view},
+    cache::{TileCache, TileState, ZoomDepCache, ensure_view},
     labels::PlacedLabel,
     poi_lookup,
+    renderer::TransitLine,
     viewport::{Viewport, world_to_lonlat},
 };
 
@@ -29,6 +30,30 @@ pub struct TappedFeature {
     pub lon: f64,
     pub lat: f64,
 }
+
+/// A tap on empty map, with where it landed.
+#[derive(Clone, Copy)]
+pub struct MapTap {
+    pub lon: f64,
+    pub lat: f64,
+}
+
+/// A rail/transit line the user tapped, reported through
+/// [`crate::MapComponent::on_line_tapped`].
+#[derive(Clone)]
+pub struct TappedLine {
+    pub properties: Properties,
+    /// The OSM way behind the tapped segment, when the tile carries feature ids.
+    pub osm_way_id: Option<u64>,
+    pub lon: f64,
+    pub lat: f64,
+    /// Ground distance (meters) the tap tolerance covers at the current zoom — how far from
+    /// (`lat`, `lon`) the tapped line can be.
+    pub hit_radius_m: f64,
+}
+
+/// How far (screen pixels) from a line a tap still selects it.
+const LINE_HIT_RADIUS_PX: f32 = 10.0;
 
 pub struct MapInputState {
     pub center: State<CursorPoint>,
@@ -53,7 +78,10 @@ pub struct MapInputState {
     pub on_place_tapped: Option<EventHandler<TappedFeature>>,
     /// Fired when a tap lands on empty map (no icon/label under it) — dismisses whatever's
     /// currently selected.
-    pub on_map_tapped: Option<EventHandler<()>>,
+    pub on_map_tapped: Option<EventHandler<MapTap>>,
+    /// Fired when a tap hits a rail/transit line (only while the style keeps their geometry,
+    /// see `StyleSpec::pick_transit_lines`).
+    pub on_line_tapped: Option<EventHandler<TappedLine>>,
 }
 
 pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData>) + 'static {
@@ -166,6 +194,9 @@ pub fn build_on_global_pointer_up(
     let platform = s.platform.clone();
     let on_place_tapped = s.on_place_tapped.clone();
     let on_map_tapped = s.on_map_tapped.clone();
+    let on_line_tapped = s.on_line_tapped.clone();
+    let tile_cache = s.tile_cache.clone();
+    let viewport_size = s.viewport_size;
     move |event: Event<PointerEventData>| {
         // Global: fires for releases anywhere in the window. Only a press that started on the
         // map (`on_pointer_down` set `initial_center`) is a map gesture — a click on an overlay
@@ -224,11 +255,39 @@ pub fn build_on_global_pointer_up(
                         });
                     }
                 }
-                // Tapping empty map area dismisses whatever popup/pin/search dropdown was
-                // showing.
                 None => {
+                    let style = style.borrow().clone();
+                    let viewport = Viewport::new(*center.peek(), *zoom.peek(), style.max_real_zoom);
+                    let (world_x, world_y) = viewport.screen_to_world(pos.x as f32, pos.y as f32);
+                    let (lon, lat) = world_to_lonlat(world_x, world_y);
+
+                    if style.pick_transit_lines
+                        && let Some(handler) = &on_line_tapped
+                        && let Some((properties, feature_id)) = hit_transit_line(
+                            &tile_cache,
+                            &viewport,
+                            viewport_size.peek().size,
+                            (pos.x as f32, pos.y as f32),
+                        )
+                    {
+                        // Web Mercator ground resolution at this latitude and zoom.
+                        let meters_per_px = 40_075_016.686 * lat.to_radians().cos()
+                            / (super::util::renderer::TILE_SIZE as f64
+                                * 2f64.powf(*zoom.peek() as f64));
+                        handler.call(TappedLine {
+                            properties,
+                            osm_way_id: feature_id.and_then(poi_lookup::decode_line_way_id),
+                            lon,
+                            lat,
+                            hit_radius_m: (LINE_HIT_RADIUS_PX as f64 * meters_per_px).max(8.0),
+                        });
+                        return;
+                    }
+
+                    // Tapping empty map area dismisses whatever popup/pin/search dropdown was
+                    // showing.
                     if let Some(handler) = &on_map_tapped {
-                        handler.call(());
+                        handler.call(MapTap { lon, lat });
                     }
                 }
             }
@@ -281,4 +340,65 @@ pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 
         // dropping its pointer/hover state, so a pan started right after zooming didn't register.)
         platform.send(UserEvent::RequestRedraw);
     }
+}
+
+/// The rail/transit line closest to screen point `pos`, within [`LINE_HIT_RADIUS_PX`], among
+/// the loaded visible tiles' `transit_lines`.
+fn hit_transit_line(
+    tile_cache: &TileCache,
+    viewport: &Viewport,
+    viewport_size: torin::geometry::Size2D,
+    pos: (f32, f32),
+) -> Option<(Properties, Option<u64>)> {
+    let (tile_x_min, tile_x_max, tile_y_min, tile_y_max) = viewport.tile_range(viewport_size);
+    let cache = tile_cache.borrow();
+    let margin = LINE_HIT_RADIUS_PX / viewport.tile_px;
+    let mut best: Option<(f32, &TransitLine)> = None;
+    for tile_y in tile_y_min..tile_y_max {
+        for tile_x in tile_x_min..tile_x_max {
+            let Some(key) = viewport.tile_key(tile_x, tile_y) else {
+                continue;
+            };
+            let Some(TileState::Loaded(tile)) = cache.peek(&key) else {
+                continue;
+            };
+            let (screen_x, screen_y) = viewport.screen_pos(tile_x, tile_y);
+            // The tap in this tile's normalized coordinates.
+            let local = (
+                (pos.0 - screen_x) / viewport.tile_px,
+                (pos.1 - screen_y) / viewport.tile_px,
+            );
+            if !(-margin..=1.0 + margin).contains(&local.0)
+                || !(-margin..=1.0 + margin).contains(&local.1)
+            {
+                continue;
+            }
+            for line in &tile.transit_lines {
+                for polyline in &line.coords {
+                    for segment in polyline.windows(2) {
+                        let distance = point_segment_distance(local, segment[0], segment[1])
+                            * viewport.tile_px;
+                        if distance <= LINE_HIT_RADIUS_PX
+                            && best.is_none_or(|(best_distance, _)| distance < best_distance)
+                        {
+                            best = Some((distance, line));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, line)| ((*line.properties).clone(), line.feature_id))
+}
+
+fn point_segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length_sq = dx * dx + dy * dy;
+    let t = if length_sq > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
 }

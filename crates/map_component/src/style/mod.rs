@@ -13,7 +13,9 @@ use crate::util::renderer::Properties;
 
 pub mod default;
 pub mod parser;
+pub mod transit;
 
+#[derive(Clone)]
 pub struct StyleSpec {
     pub layers: Vec<StyleLayer>,
     /// Vector tile URL, with `{z}`/`{x}`/`{y}` placeholders, resolved from the style JSON's
@@ -28,8 +30,17 @@ pub struct StyleSpec {
     /// or TileJSON) — `Viewport` never requests real tiles past this; digital over-zoom past it
     /// is a UI-only concern layered on top (see `viewport::max_zoom_ui`).
     pub max_real_zoom: u32,
+    /// Only POIs matching this get an icon (see `renderer::compile`'s `extract_pois`); `None`
+    /// keeps every POI. Set by overlays such as [`transit::with_transit`] to declutter the map.
+    pub poi_filter: Option<Filter>,
+    /// Zoom from which POI icons are drawn.
+    pub icon_min_zoom: f64,
+    /// Keep rail/transit line geometry per feature so a tap can hit-test it (see
+    /// `CompiledTile::transit_lines`). Off by default — it costs memory per tile.
+    pub pick_transit_lines: bool,
 }
 
+#[derive(Clone)]
 pub enum StyleLayer {
     Background(BgLayer),
     Fill(FillLayer),
@@ -37,10 +48,12 @@ pub enum StyleLayer {
     Symbol(SymbolLayer),
 }
 
+#[derive(Clone)]
 pub struct BgLayer {
     pub color: Color,
 }
 
+#[derive(Clone)]
 pub struct FillLayer {
     pub source_layer: String,
     pub min_zoom: f64,
@@ -54,6 +67,7 @@ pub struct FillLayer {
     pub translate: Option<(NumExpr, NumExpr)>,
 }
 
+#[derive(Clone)]
 pub struct LineLayer {
     pub source_layer: String,
     pub min_zoom: f64,
@@ -89,6 +103,7 @@ pub enum LineJoin {
 
 /// A text-label layer. Only the properties the neutrino style actually uses are modeled —
 /// no icons, offsets, wrapping, or letter-spacing yet.
+#[derive(Clone)]
 pub struct SymbolLayer {
     pub source_layer: String,
     pub min_zoom: f64,
@@ -127,6 +142,7 @@ pub enum TextPlacement {
 
 /// The two `symbol-sort-key` shapes neutrino uses: `["get", key]` and
 /// `["-", ["to-number", ["get", key], 0]]` (descending sort by e.g. population).
+#[derive(Clone)]
 pub struct SortKey {
     pub key: String,
     pub negate: bool,
@@ -143,6 +159,7 @@ impl SortKey {
 /// A `text-field` expression: a literal, a property lookup, first-non-empty of several, or a
 /// concatenation (which is also how `"{ref}"`-style templates parse: literal and `Get` parts
 /// concatenated in order).
+#[derive(Clone)]
 pub enum TextExpr {
     Static(String),
     Get(String),
@@ -167,6 +184,7 @@ impl TextExpr {
 
 // ─── Expressions ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub enum ColorExpr {
     Static(Color),
     /// `["match", ["get", key], label, color, ..., default]` — a label may be a string, number
@@ -183,6 +201,7 @@ pub enum ColorExpr {
     },
 }
 
+#[derive(Clone)]
 pub enum NumExpr {
     Static(f64),
     ZoomInterp {
@@ -197,6 +216,7 @@ pub enum NumExpr {
 
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub enum Filter {
     All(Vec<Filter>),
     Any(Vec<Filter>),
@@ -278,6 +298,23 @@ impl ColorExpr {
 }
 
 impl NumExpr {
+    /// The same expression with every output value multiplied by `factor` (e.g. to fade an
+    /// opacity).
+    pub fn scaled(&self, factor: f64) -> NumExpr {
+        let scale = |stops: &[(f64, f64)]| stops.iter().map(|(z, v)| (*z, v * factor)).collect();
+        match self {
+            NumExpr::Static(v) => NumExpr::Static(v * factor),
+            NumExpr::ZoomInterp { base, stops } => NumExpr::ZoomInterp {
+                base: *base,
+                stops: scale(stops),
+            },
+            NumExpr::ZoomStep { default, stops } => NumExpr::ZoomStep {
+                default: default * factor,
+                stops: scale(stops),
+            },
+        }
+    }
+
     pub fn eval(&self, zoom: f64) -> f64 {
         match self {
             NumExpr::Static(v) => *v,

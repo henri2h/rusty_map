@@ -37,6 +37,9 @@ async fn main() {
         sprite_url: None,
         min_zoom: 0.0,
         max_real_zoom: 14,
+        poi_filter: None,
+        icon_min_zoom: map_component::util::labels::ICON_MIN_ZOOM,
+        pick_transit_lines: false,
     });
 
     let tile = fetch_tile((14, x, y), style.clone())

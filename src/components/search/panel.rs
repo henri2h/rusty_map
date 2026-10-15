@@ -28,7 +28,10 @@ use map_component::{
     },
 };
 
-use crate::components::place::{PlaceController, SelectedPlace, humanize};
+use crate::components::{
+    place::{PlaceController, SelectedPlace, humanize},
+    transit::{Departures, Endpoint, Planner, TrackView, TransitController, TransitView, TripView},
+};
 
 use super::{
     opening_hours::parse_opening_hours,
@@ -63,28 +66,37 @@ pub struct SearchPanel {
     map: MapController,
     places: PlaceController,
     search: SearchController,
+    transit: TransitController,
 }
 
 impl SearchPanel {
-    pub fn new(map: MapController, places: PlaceController, search: SearchController) -> Self {
+    pub fn new(
+        map: MapController,
+        places: PlaceController,
+        search: SearchController,
+        transit: TransitController,
+    ) -> Self {
         Self {
             map,
             places,
             search,
+            transit,
         }
     }
 }
 
 impl Component for SearchPanel {
     fn render(&self) -> impl IntoElement {
-        let (map, places, search) = (&self.map, &self.places, &self.search);
+        let (map, places, search, transit) = (&self.map, &self.places, &self.search, &self.transit);
 
         let on_validate = build_on_search_input(map, places, search);
         let has_query = !search.query.read().is_empty();
         let status = *search.status.read();
         let results = search.results.read().clone();
         let place = places.selected_place.read().clone();
-        let drawer_open = place.is_some();
+        let view = transit.view.read().clone();
+        let planner_open = *transit.planner_open.read();
+        let drawer_open = place.is_some() || view.is_some() || planner_open;
         let dropdown = (!drawer_open && status != SearchStatus::Idle)
             .then(|| results_dropdown(status, results, map, places, search));
         let rounded = !drawer_open && dropdown.is_none();
@@ -125,9 +137,23 @@ impl Component for SearchPanel {
             .width(Size::fill())
             .leading(icon(lucide::search(), TEXT_FAINT))
             .on_validate(on_validate);
-        if has_query {
+        if !has_query {
+            let mut transit = transit.clone();
+            input = input.trailing(
+                rect().cursor(CursorIcon::Pointer).child(
+                    icon(lucide::route(), ACCENT)
+                        .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
+                        .on_press(move |e: Event<PressEventData>| {
+                            e.stop_propagation();
+                            e.prevent_default();
+                            transit.open_planner(None);
+                        }),
+                ),
+            );
+        } else {
             let mut places = places.clone();
             let mut search = search.clone();
+            let mut transit = transit.clone();
             input = input.trailing(
                 rect().cursor(CursorIcon::Pointer).child(
                     icon(lucide::x(), TEXT_MUTED)
@@ -139,10 +165,24 @@ impl Component for SearchPanel {
                             e.prevent_default();
                             search.reset(String::new());
                             places.clear();
+                            transit.close_view();
                         }),
                 ),
             );
         }
+
+        let content: Vec<Element> = if planner_open {
+            vec![Planner {}.into_element()]
+        } else {
+            let mut content = vec![input.into_element()];
+            content.extend(dropdown);
+            if let Some(view) = view {
+                content.push(transit_view(view, transit.clone()));
+            } else if let Some(place) = place {
+                content.push(place_details(place, transit.clone()).into_element());
+            }
+            content
+        };
 
         rect()
             .position(Position::new_absolute().top(0.0f32).left(0.0f32))
@@ -162,10 +202,68 @@ impl Component for SearchPanel {
             .maybe(!drawer_open, |r| r.margin(12.0f32))
             .padding(if drawer_open { 16.0f32 } else { 8.0f32 })
             .vertical()
-            .child(input)
-            .maybe_child(dropdown)
-            .maybe_child(place.map(|place| place_details(place).into_element()))
+            .children(content)
     }
+}
+
+/// A transit view (tapped track, or a trip) under a "Back" row returning to what was there.
+fn transit_view(view: TransitView, transit: TransitController) -> Element {
+    let mut close = transit.clone();
+    let content = match view {
+        TransitView::Track {
+            id,
+            way_id,
+            lat,
+            lon,
+            radius_m,
+            kind,
+        } => TrackView {
+            id,
+            way_id,
+            lat,
+            lon,
+            radius_m,
+            kind,
+        }
+        .into_element(),
+        TransitView::Trip {
+            id,
+            departure,
+            from_stop,
+        } => TripView {
+            id,
+            departure,
+            from_stop,
+        }
+        .into_element(),
+    };
+    rect()
+        .vertical()
+        .width(Size::fill())
+        .height(Size::fill())
+        .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
+        .child(
+            Button::new()
+                .flat()
+                .compact()
+                .on_press(move |_: Event<PressEventData>| close.close_view())
+                .child(
+                    rect()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(6.0)
+                        .child(icon(lucide::arrow_left(), TEXT_MUTED))
+                        .child(label().text("Back").font_size(13.0).color(TEXT_MUTED)),
+                ),
+        )
+        .child(
+            ScrollView::new()
+                .height(Size::fill())
+                .direction(Direction::vertical())
+                .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
+                .child(content),
+        )
+        .into_element()
 }
 
 /// A lucide icon at the standard row size.
@@ -372,15 +470,18 @@ fn build_on_search_input(
 /// its own ✕ closes the drawer, so there's no second title/close header here. One continuous
 /// `ScrollView` for everything (not several small independent ones), so content past the
 /// window's bottom edge is actually reachable instead of silently clipped.
-fn place_details(place: SelectedPlace) -> impl IntoElement {
+fn place_details(place: SelectedPlace, transit: TransitController) -> impl IntoElement {
     let SelectedPlace {
         id,
+        title,
         subtitle,
         mut details,
         raw_tags,
         links,
         loading,
         image,
+        transit_stop,
+        coords,
         ..
     } = place;
 
@@ -430,6 +531,37 @@ fn place_details(place: SelectedPlace) -> impl IntoElement {
                 .into_element(),
         );
     }
+    if let Some((lat, lon)) = coords {
+        let mut transit = transit.clone();
+        let name = title.clone();
+        body.push(
+            Button::new()
+                .filled()
+                .width(Size::fill())
+                .on_press(move |_: Event<PressEventData>| {
+                    transit.open_planner(Some(Endpoint {
+                        name: name.clone(),
+                        lat,
+                        lon,
+                    }))
+                })
+                .child(
+                    rect()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(6.0)
+                        .child(icon(lucide::route(), Color::WHITE))
+                        .child(
+                            label()
+                                .text("Directions")
+                                .font_size(13.0)
+                                .color(Color::WHITE),
+                        ),
+                )
+                .into_element(),
+        );
+        body.push(rect().height(Size::px(8.0)).into_element());
+    }
     if !links.is_empty() {
         // Two per row, each half the width: a wrapping row would shrink a chip's label onto two
         // lines instead of moving the chip down (text always "fits" by wrapping).
@@ -454,6 +586,17 @@ fn place_details(place: SelectedPlace) -> impl IntoElement {
                     .into_element(),
             );
         }
+    }
+    if let Some((lat, lon)) = transit_stop {
+        body.push(
+            Departures {
+                place_id: id,
+                lat,
+                lon,
+                name: title,
+            }
+            .into_element(),
+        );
     }
     if loading {
         body.push(
@@ -751,7 +894,7 @@ impl Component for RawTags {
     }
 
     fn render_key(&self) -> DiffKey {
-        DiffKey::U64(self.place_id)
+        crate::components::place::section_key("raw-tags", self.place_id)
     }
 }
 

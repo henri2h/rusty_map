@@ -44,6 +44,7 @@ pub fn paint_map(
     // World position (see `Viewport::screen_to_world`) of a search-result pin to draw, when the
     // selected place isn't an already-visible POI icon — see `MapController::marker_world`.
     marker_world: Option<(f64, f64)>,
+    route_overlay: Option<&crate::overlay::RouteOverlay>,
 ) {
     let time_start = time::Instant::now();
     let zoom = zoom_val as f64;
@@ -231,6 +232,12 @@ pub fn paint_map(
         }
     }
 
+    // Trip/journey overlay: over the tiles, under the labels so stop and street names stay
+    // readable.
+    if let Some(overlay) = route_overlay {
+        crate::overlay::draw_overlay(context.canvas, overlay, &viewport);
+    }
+
     // Label pass: screen-space text over the finished tiles. `drop(cache)` first — the pass
     // doesn't need the tile cache, and holding the borrow would be a needless hazard.
     drop(cache);
@@ -255,7 +262,7 @@ pub fn paint_map(
 
     // POI icon candidates: same projection as labels, only at street-level zooms.
     let mut icon_candidates: Vec<IconCandidate> = Vec::new();
-    if zoom >= labels::ICON_MIN_ZOOM && sprite_sheet.is_some() {
+    if zoom >= style.icon_min_zoom && sprite_sheet.is_some() {
         for (tile, tile_screen_x, tile_screen_y, tile_px) in &label_tiles {
             for poi in &tile.pois {
                 let screen_x = tile_screen_x + poi.x * tile_px;

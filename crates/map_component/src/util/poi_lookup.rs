@@ -24,3 +24,13 @@ pub fn decode_feature_id(id: u64) -> Option<(String, u64)> {
     };
     Some((osm_type.to_string(), id / 10))
 }
+
+/// The OSM way id behind a line feature (`transportation` layer). The data.gouv.fr tiles pack
+/// ways as `osm_id * 10` plus type digit 2 — or 0 for lines Planetiler merged from several ways,
+/// whose id is still one of them (checked against the live OSM API for metro, RER and tram
+/// segments in Paris).
+pub fn decode_line_way_id(id: u64) -> Option<u64> {
+    matches!(id % 10, 0 | 2)
+        .then_some(id / 10)
+        .filter(|&way| way > 0)
+}

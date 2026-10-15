@@ -103,6 +103,9 @@ pub fn default_style() -> StyleSpec {
         sprite_url: Some(DEFAULT_SPRITE_URL.to_string()),
         min_zoom: DEFAULT_MIN_ZOOM,
         max_real_zoom: DEFAULT_MAX_REAL_ZOOM,
+        poi_filter: None,
+        icon_min_zoom: crate::util::labels::ICON_MIN_ZOOM,
+        pick_transit_lines: false,
     }
 }
 

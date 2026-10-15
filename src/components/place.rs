@@ -198,6 +198,8 @@ pub fn place_from_tap(tap: &TappedFeature) -> SelectedPlace {
         marker_world: None,
         loading: true,
         image: None,
+        transit_stop: is_transit_poi(&tap.properties).then_some((tap.lat, tap.lon)),
+        coords: Some((tap.lat, tap.lon)),
     }
 }
 
@@ -217,7 +219,40 @@ pub fn place_from_search_result(result: &SearchResult) -> SelectedPlace {
         marker_world: Some(lonlat_to_world(lon, lat)),
         loading: true,
         image: None,
+        transit_stop: TRANSIT_KINDS
+            .contains(&result.category.as_str())
+            .then_some((lat, lon)),
+        coords: Some((lat, lon)),
     }
+}
+
+/// OSM values (`highway=bus_stop`, `railway=station`, `public_transport=platform`, …) marking a
+/// place where a timetable applies — OpenMapTiles `subclass`, shortbread `kind`, or Photon's
+/// `osm_value`.
+const TRANSIT_KINDS: &[&str] = &[
+    "bus_stop",
+    "bus_station",
+    "station",
+    "halt",
+    "tram_stop",
+    "subway",
+    "stop",
+    "stop_position",
+    "platform",
+    "stop_area",
+    "ferry_terminal",
+];
+
+/// `true` for a tapped stop/station POI. OpenMapTiles puts every railway stop (station, halt,
+/// metro, tram) under `class=railway` and bus stops under `class=bus`.
+fn is_transit_poi(properties: &Properties) -> bool {
+    let is = |key: &str, values: &[&str]| {
+        properties
+            .get(key)
+            .and_then(value_to_string)
+            .is_some_and(|value| values.contains(&value.as_str()))
+    };
+    is("class", &["railway", "bus"]) || is("subclass", TRANSIT_KINDS) || is("kind", TRANSIT_KINDS)
 }
 
 /// Fetches the rich OSM tags (opening hours, phone, website, Wikipedia, …) for a tapped POI. Uses
@@ -274,6 +309,11 @@ pub struct SelectedPlace {
     /// tag and that entity sets one — see `wikipedia::fetch_wikidata_info`/
     /// `wikipedia::fetch_commons_thumbnail`, same source `shom_client`'s popup image uses.
     pub image: Option<bytes::Bytes>,
+    /// Position to look up departures at, when the place is a public-transport stop or station
+    /// (see `transit::Departures`).
+    pub transit_stop: Option<(f64, f64)>,
+    /// `(lat, lon)`, e.g. to plan a journey there.
+    pub coords: Option<(f64, f64)>,
 }
 
 impl SelectedPlace {
@@ -293,6 +333,16 @@ impl SelectedPlace {
         }
         self.loading = false;
     }
+}
+
+/// Diff key for a drawer section that must start over for each new selection (fresh state,
+/// fresh fetch). Mixes in the section's name: several such sections sit side by side in the
+/// drawer, and freya rejects sibling components sharing a key.
+pub fn section_key(section: &str, place_id: u64) -> DiffKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    (section, place_id).hash(&mut hasher);
+    DiffKey::U64(hasher.finish())
 }
 
 /// Replaces the value of every `(key, _)` in `rows` that `new` also has, in place; appends the rest.
@@ -786,6 +836,8 @@ mod tests {
             marker_world: None,
             loading: true,
             image: None,
+            transit_stop: None,
+            coords: None,
         };
         place.apply(EnrichedDetails {
             rows: tags(&[("Opening hours", "Mo-Fr 09:00-18:00"), ("Phone", "1")]),

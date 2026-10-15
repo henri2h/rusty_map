@@ -8,6 +8,10 @@ use super::util::tiles::{fetch_text_cached, invalidate_text_cache};
 /// which tile source and sprite sheet get fetched — see [`resolve_style`].
 const STYLE_URL: &str = "https://openmaptiles.geo.data.gouv.fr/styles/osm-bright/style.json";
 
+/// Environment variable overriding the vector tile URL template (`…/{z}/{x}/{y}…`), e.g. to use
+/// self-hosted tiles built with the OpenMapTiles schema the style expects.
+const TILE_URL_ENV: &str = "RUSTY_MAP_TILE_URL";
+
 /// Fetches (with a permanent disk cache, like tiles) and parses the real style at [`STYLE_URL`],
 /// falling back to `style::default::default_style()` on any network or parse error. A cached copy
 /// that fails to parse is deleted and refetched once — a corrupt cache file must not permanently
@@ -66,10 +70,17 @@ async fn resolve_style(parsed: style::parser::ParsedStyle) -> StyleSpec {
         }
     }
 
-    let tile_url_template = tiles_template.unwrap_or_else(|| {
-        log::warn!("[style] no usable vector source, using default source");
-        style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
-    });
+    // Self-hosted tiles in the same OpenMapTiles schema replace the style's own source.
+    let tile_url_template = match std::env::var(TILE_URL_ENV) {
+        Ok(url) if !url.is_empty() => {
+            log::info!("[style] tiles from {TILE_URL_ENV}: {url}");
+            url
+        }
+        _ => tiles_template.unwrap_or_else(|| {
+            log::warn!("[style] no usable vector source, using default source");
+            style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
+        }),
+    };
 
     StyleSpec {
         layers: parsed.layers,
@@ -81,6 +92,9 @@ async fn resolve_style(parsed: style::parser::ParsedStyle) -> StyleSpec {
         max_real_zoom: max_zoom
             .map(|z| z as u32)
             .unwrap_or(style::default::DEFAULT_MAX_REAL_ZOOM),
+        poi_filter: None,
+        icon_min_zoom: crate::util::labels::ICON_MIN_ZOOM,
+        pick_transit_lines: false,
     }
 }
 

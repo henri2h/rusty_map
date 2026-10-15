@@ -13,8 +13,8 @@ use super::tiles::DecodedTile;
 use crate::style::{StyleLayer, StyleSpec, TextPlacement};
 
 pub use compile::{
-    CompiledLabel, CompiledPoi, CompiledTile, LabelAnchor, TILE_RASTER_SIZE, ZoomDependentEntry,
-    compile_tile, rasterize_cell, rasterize_picture, rasterize_zoom_dependent,
+    CompiledLabel, CompiledPoi, CompiledTile, LabelAnchor, TILE_RASTER_SIZE, TransitLine,
+    ZoomDependentEntry, compile_tile, rasterize_cell, rasterize_picture, rasterize_zoom_dependent,
 };
 pub use draw::{apply_opacity, draw_layer_path};
 pub use labels::readable_angle;
@@ -93,7 +93,13 @@ pub fn build_renderable_tile(decoded: DecodedTile, style: &StyleSpec) -> Rendera
     let source_layers = decoded
         .into_iter()
         .map(|(layer, features)| {
-            let keep_line_coords = line_label_sources.contains(layer.name.as_str());
+            let keep_line_coords = if line_label_sources.contains(layer.name.as_str()) {
+                KeepCoords::All
+            } else if style.pick_transit_lines && layer.name == TRANSIT_SOURCE_LAYER {
+                KeepCoords::TransitOnly
+            } else {
+                KeepCoords::None
+            };
             (
                 layer.name,
                 build_layer_features(layer.extent, features, keep_line_coords),
@@ -104,10 +110,33 @@ pub fn build_renderable_tile(decoded: DecodedTile, style: &StyleSpec) -> Rendera
     RenderableTile { source_layers }
 }
 
+/// OpenMapTiles' source layer holding rail/transit (and road) line geometry.
+pub const TRANSIT_SOURCE_LAYER: &str = "transportation";
+
+/// `transportation` classes a tap can select as a transit line.
+pub const TRANSIT_LINE_CLASSES: &[&str] = &["rail", "transit"];
+
+/// Which features of a layer keep raw line coordinates (`RenderableFeature::line_coords`).
+#[derive(Clone, Copy, PartialEq)]
+enum KeepCoords {
+    None,
+    All,
+    /// Only rail/transit lines (see [`is_transit_line`]), for tap hit-testing.
+    TransitOnly,
+}
+
+/// `true` for a `transportation` feature that is a rail or transit line.
+pub fn is_transit_line(properties: &Properties) -> bool {
+    matches!(
+        properties.get("class"),
+        Some(Value::String(class)) if TRANSIT_LINE_CLASSES.contains(&class.as_str())
+    )
+}
+
 fn build_layer_features(
     extent: u32,
     features: Vec<Feature>,
-    keep_line_coords: bool,
+    keep_line_coords: KeepCoords,
 ) -> Vec<RenderableFeature> {
     let extent = extent.max(1) as f32;
 
@@ -116,7 +145,12 @@ fn build_layer_features(
         .flat_map(|feature| {
             let properties: Arc<Properties> =
                 Arc::new(feature.properties.into_iter().flatten().collect());
-            let line_coords = keep_line_coords
+            let keep = match keep_line_coords {
+                KeepCoords::None => false,
+                KeepCoords::All => true,
+                KeepCoords::TransitOnly => is_transit_line(&properties),
+            };
+            let line_coords = keep
                 .then(|| extract_line_coords(&feature.geometry, extent))
                 .filter(|lines| !lines.is_empty())
                 .map(Rc::new);

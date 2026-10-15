@@ -1,8 +1,8 @@
 use freya::engine::prelude::{Image, Paint, PaintStyle, Path, Rect, raster_n32_premul};
 use skia_safe::{Picture, PictureRecorder};
 
-use crate::style::StyleLayer;
 use crate::style::StyleSpec;
+use crate::style::{Filter, StyleLayer};
 
 use super::draw::{draw_layer_path, record_fill_layer, record_line_layer};
 use super::labels::extract_labels;
@@ -53,6 +53,9 @@ pub struct CompiledTile {
     /// POI icon markers extracted from the shortbread `pois` source layer (the style itself has
     /// no icon layers — icons are this app's own addition), drawn/hit-tested by the label pass.
     pub pois: Vec<CompiledPoi>,
+    /// Rail/transit line features with their raw coordinates, for tap hit-testing — only filled
+    /// when the style asks for it (`StyleSpec::pick_transit_lines`).
+    pub transit_lines: Vec<TransitLine>,
     /// Text labels extracted from this tile's symbol layers — text already evaluated and
     /// transformed, anchors in normalized tile coords. Drawn per-frame in screen space by the
     /// paint loop's label pass (never baked into the bitmap, so text size stays constant on
@@ -110,6 +113,33 @@ pub struct CompiledPoi {
     pub properties: std::sync::Arc<Properties>,
     /// See `RenderableFeature::id`'s doc comment.
     pub feature_id: Option<u64>,
+}
+
+/// One rail/transit line feature a tap can select.
+pub struct TransitLine {
+    /// Polylines in normalized tile coordinates.
+    pub coords: Vec<Vec<(f32, f32)>>,
+    pub properties: std::sync::Arc<Properties>,
+    /// See `RenderableFeature::id`'s doc comment.
+    pub feature_id: Option<u64>,
+}
+
+fn extract_transit_lines(tile: &RenderableTile) -> Vec<TransitLine> {
+    let Some(features) = tile.source_layers.get(super::TRANSIT_SOURCE_LAYER) else {
+        return Vec::new();
+    };
+    features
+        .iter()
+        .filter(|feature| super::is_transit_line(&feature.properties))
+        .filter_map(|feature| {
+            Some(TransitLine {
+                // Owned copy: compiled tiles cross threads, the source `Rc` can't.
+                coords: feature.line_coords.as_deref()?.clone(),
+                properties: feature.properties.clone(),
+                feature_id: feature.id,
+            })
+        })
+        .collect()
 }
 
 pub enum LabelAnchor {
@@ -233,7 +263,8 @@ pub fn compile_tile(tile: &RenderableTile, style: &StyleSpec, zoom_z: u32) -> Co
         picture,
         zoom_dependent,
         labels,
-        pois: extract_pois(tile),
+        pois: extract_pois(tile, style.poi_filter.as_ref()),
+        transit_lines: extract_transit_lines(tile),
     }
 }
 
@@ -248,7 +279,7 @@ const POI_KIND_KEYS: &[&str] = &[
 /// schema, `pois` is shortbread's.
 const POI_LAYER_NAMES: &[&str] = &["poi", "pois"];
 
-fn extract_pois(tile: &RenderableTile) -> Vec<CompiledPoi> {
+fn extract_pois(tile: &RenderableTile, filter: Option<&Filter>) -> Vec<CompiledPoi> {
     let Some(features) = POI_LAYER_NAMES
         .iter()
         .filter_map(|name| tile.source_layers.get(*name))
@@ -262,6 +293,9 @@ fn extract_pois(tile: &RenderableTile) -> Vec<CompiledPoi> {
         let FeatureGeometry::Points(points) = &feature.geometry else {
             continue;
         };
+        if filter.is_some_and(|filter| !filter.eval(&feature.properties)) {
+            continue;
+        }
         let Some(kind) = POI_KIND_KEYS.iter().find_map(|key| {
             feature.properties.get(*key).and_then(|value| match value {
                 mvt_reader::feature::Value::String(s) if !s.is_empty() => Some(s.clone()),
