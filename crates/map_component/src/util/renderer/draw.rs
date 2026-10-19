@@ -13,10 +13,12 @@ use super::{Properties, RenderableFeature};
 /// screen-pixel style widths into the canvas's current normalized tile-local space (the canvas is
 /// already scaled into `0..1` tile space when this is called). A future layer kind (e.g. `Symbol`
 /// text) adds its arm here plus `compile_tile`'s match and the style parser — nothing else.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_layer_path(
     canvas: &Canvas,
     layer: &StyleLayer,
     path: &Path,
+    properties: Option<&Properties>,
     zoom: f64,
     stroke_scale: f32,
     fill_paint: &mut Paint,
@@ -94,7 +96,9 @@ pub fn draw_layer_path(
                 canvas,
                 path,
                 apply_opacity(
-                    line_layer.color.eval(&Properties::default(), zoom),
+                    line_layer
+                        .color
+                        .eval(properties.unwrap_or(&Properties::default()), zoom),
                     line_layer.opacity.eval(zoom) as f32,
                 ),
                 width_px * stroke_scale,
@@ -204,12 +208,36 @@ pub fn record_fill_layer<'a>(
 /// doc comment describes — real style check showed 0 of 72 line layers use zoom-dependent color,
 /// so nearly everything should have baked. Caused a visible UI regression in practice, reverted.
 /// Root cause not diagnosed — worth another look before retrying, rather than re-guessing.
+///
+/// A layer whose color depends on the feature (e.g. each transit line's own colour) is split
+/// into one merged path per resulting color, so merging doesn't paint every feature alike.
 pub fn record_line_layer<'a>(
     matched: impl Iterator<Item = (&'a Path, &'a RenderableFeature)>,
+    line_layer: &crate::style::LineLayer,
+    zoom: f64,
     zoom_dependent: &mut Vec<ZoomDependentEntry>,
     style_index: usize,
 ) {
-    push_zoom_dependent(matched, zoom_dependent, style_index);
+    if !line_layer.color.is_data_driven() {
+        push_zoom_dependent(matched, zoom_dependent, style_index);
+        return;
+    }
+    let mut by_color: Vec<(Color, Vec<(&'a Path, &'a RenderableFeature)>)> = Vec::new();
+    for (path, feature) in matched {
+        let color = line_layer.color.eval(&feature.properties, zoom);
+        match by_color.iter_mut().find(|(known, _)| *known == color) {
+            Some((_, group)) => group.push((path, feature)),
+            None => by_color.push((color, vec![(path, feature)])),
+        }
+    }
+    for (_, group) in by_color {
+        let properties = group[0].1.properties.clone();
+        let start = zoom_dependent.len();
+        push_zoom_dependent(group.into_iter(), zoom_dependent, style_index);
+        if let Some(entry) = zoom_dependent.get_mut(start) {
+            entry.properties = Some(properties);
+        }
+    }
 }
 
 fn push_zoom_dependent<'a>(
@@ -227,6 +255,7 @@ fn push_zoom_dependent<'a>(
         zoom_dependent.push(ZoomDependentEntry {
             style_index,
             path: builder.detach(),
+            properties: None,
         });
     }
 }

@@ -12,6 +12,10 @@ use super::{
     SymbolLayer, TextExpr, TextPlacement, TextTransform,
 };
 
+/// Bus lines clutter the map below this zoom (one per street), so they're drawn — and tappable —
+/// only from here.
+pub const BUS_LINES_MIN_ZOOM: f64 = 15.0;
+
 /// Opacity multiplier for the base style's own `transportation` lines, so transit stands out.
 const ROAD_FADE: f64 = 0.35;
 
@@ -106,6 +110,56 @@ pub fn with_transit(base: &StyleSpec) -> StyleSpec {
         layers.push(transit_line(filter, color, min_zoom, &widths));
     }
 
+    // rusty_map's own tiles: each line in its own colour (`route_1_colour`, the first and most
+    // important line on that stretch), drawn over the generic per-mode lines above, which still
+    // show wherever a track carries no route. Other tile sources have no `transit_lines`, so these
+    // match nothing there.
+    let route_kinds = [
+        (&["train"][..], RAIL, 6.0, [(6.0, 1.2), (12.0, 2.4), (16.0, 4.0), (19.0, 6.5)]),
+        (
+            &["subway"][..],
+            SUBWAY,
+            9.0,
+            [(9.0, 1.6), (13.0, 3.0), (16.0, 5.0), (19.0, 8.5)],
+        ),
+        (
+            &["tram", "light_rail", "monorail", "funicular"][..],
+            TRAM,
+            10.0,
+            [(10.0, 1.3), (13.0, 2.4), (16.0, 4.0), (19.0, 7.0)],
+        ),
+        (
+            &["bus", "trolleybus"][..],
+            BUSWAY,
+            BUS_LINES_MIN_ZOOM,
+            [(15.0, 1.2), (17.0, 2.2), (19.0, 3.5), (20.0, 4.0)],
+        ),
+    ];
+    for (modes, fallback, min_zoom, widths) in route_kinds {
+        let filter = Filter::In(
+            "mode".into(),
+            modes.iter().map(|mode| str_value(mode)).collect(),
+        );
+        let casing_widths = widths.map(|(z, w)| (z, w + 2.5));
+        layers.push(line_layer(
+            ROUTE_SOURCE,
+            filter.clone(),
+            ColorExpr::Static(CASING),
+            min_zoom,
+            &casing_widths,
+        ));
+        layers.push(line_layer(
+            ROUTE_SOURCE,
+            filter,
+            ColorExpr::Property {
+                key: "route_1_colour".into(),
+                default: fallback,
+            },
+            min_zoom,
+            &widths,
+        ));
+    }
+
     layers.push(station_labels(
         &["station", "halt"],
         11.0,
@@ -139,13 +193,32 @@ fn str_value(value: &str) -> MatchValue {
     MatchValue::Str(value.to_string())
 }
 
+/// rusty_map's own tiles' layer of transit lines with their routes (see `tools/tiles`).
+const ROUTE_SOURCE: &str = "transit_lines";
+
 fn transit_line(filter: Filter, color: Color, min_zoom: f64, widths: &[(f64, f64)]) -> StyleLayer {
+    line_layer(
+        "transportation",
+        filter,
+        ColorExpr::Static(color),
+        min_zoom,
+        widths,
+    )
+}
+
+fn line_layer(
+    source_layer: &str,
+    filter: Filter,
+    color: ColorExpr,
+    min_zoom: f64,
+    widths: &[(f64, f64)],
+) -> StyleLayer {
     StyleLayer::Line(LineLayer {
-        source_layer: "transportation".into(),
+        source_layer: source_layer.into(),
         min_zoom,
         max_zoom: 24.0,
         filter: Some(filter),
-        color: ColorExpr::Static(color),
+        color,
         width: NumExpr::ZoomInterp {
             base: 1.4,
             stops: widths.to_vec(),
@@ -210,8 +283,8 @@ mod tests {
         // The base road layer keeps its place, faded.
         let road = opacity(&transit.layers[base.layers.len() - 1]).unwrap();
         assert!((road - ROAD_FADE).abs() < 1e-9);
-        // Casing + line for each of the 5 kinds, plus 2 station label layers.
-        assert_eq!(transit.layers.len(), base.layers.len() + 12);
+        // Casing + line for each of the 5 track kinds and 4 route kinds, plus 2 station labels.
+        assert_eq!(transit.layers.len(), base.layers.len() + 20);
         assert!(transit.poi_filter.is_some());
     }
 }

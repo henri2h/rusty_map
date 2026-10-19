@@ -385,9 +385,84 @@ fn route_mode(route: &str) -> Mode {
     }
 }
 
-/// The relation's member ways and named stops, for drawing the whole line.
+/// The lines a `transit_lines` tile feature (rusty_map's own tiles) names in its
+/// `route_<n>_*` attributes, in the tile's order (rail first). Empty for any other feature.
+pub fn routes_from_tile(properties: &map_component::util::renderer::Properties) -> Vec<RouteInfo> {
+    use mvt_reader::feature::Value;
+    let text = |key: String| match properties.get(&key) {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    };
+    let number = |key: String| match properties.get(&key) {
+        Some(Value::Int(v) | Value::SInt(v)) => u64::try_from(*v).ok(),
+        Some(Value::UInt(v)) => Some(*v),
+        _ => None,
+    };
+    (1..)
+        .map_while(|n| {
+            let prefix = format!("route_{n}_");
+            let line = text(format!("{prefix}ref"));
+            let name = text(format!("{prefix}name"));
+            if line.is_none() && name.is_none() {
+                return None;
+            }
+            Some(RouteInfo {
+                relation_id: number(format!("{prefix}id")).unwrap_or(0),
+                mode: route_mode(&text(format!("{prefix}mode")).unwrap_or_default()),
+                line: line.clone().or(name.clone()).unwrap_or_default(),
+                name: name.or(line).unwrap_or_default(),
+                color: text(format!("{prefix}colour")).as_deref().and_then(parse_hex_color),
+                network: text(format!("{prefix}network")),
+                operator: None,
+                from: None,
+                to: None,
+            })
+        })
+        .collect()
+}
+
+/// The relation's member ways and named stops, for drawing the whole line. A line-level
+/// `route_master` (what rusty_map's tiles reference) is drawn as all its member routes.
 pub async fn route_shape(relation_id: u64) -> Result<RouteShape, FetchError> {
     let full = elements(get(format!("{OSM_API}/relation/{relation_id}/full.json")).await?);
+    let relation = full
+        .iter()
+        .find(|e| e.kind == "relation" && e.id == relation_id)
+        .ok_or(FetchError::InvalidData)?;
+
+    if relation.tag("type").as_deref() == Some("route_master") {
+        // Variants (RER A1/A2/…, both directions) each fetched in full; capped, a few suffice to
+        // cover the whole network of a line.
+        let members: Vec<u64> = relation
+            .members
+            .iter()
+            .filter(|member| member.kind == "relation")
+            .map(|member| member.id)
+            .take(MAX_MASTER_MEMBERS)
+            .collect();
+        let mut shape = RouteShape {
+            ways: Vec::new(),
+            stops: Vec::new(),
+        };
+        for member in members {
+            let full = elements(get(format!("{OSM_API}/relation/{member}/full.json")).await?);
+            let part = shape_of(&full, member)?;
+            shape.ways.extend(part.ways);
+            for stop in part.stops {
+                if !shape.stops.iter().any(|(known, _, _)| *known == stop.0) {
+                    shape.stops.push(stop);
+                }
+            }
+        }
+        return Ok(shape);
+    }
+    shape_of(&full, relation_id)
+}
+
+/// How many of a `route_master`'s routes [`route_shape`] fetches.
+const MAX_MASTER_MEMBERS: usize = 8;
+
+fn shape_of(full: &[Element], relation_id: u64) -> Result<RouteShape, FetchError> {
     let relation = full
         .iter()
         .find(|e| e.kind == "relation" && e.id == relation_id)

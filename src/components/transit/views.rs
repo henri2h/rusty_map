@@ -47,38 +47,35 @@ pub struct TrackView {
     pub lon: f64,
     pub radius_m: f64,
     pub kind: String,
+    /// Lines read from the tile itself; skips the lookup.
+    pub from_tile: Option<TrackInfo>,
 }
 
 impl Component for TrackView {
     fn render(&self) -> impl IntoElement {
         let transit = use_consume::<TransitController>();
-        let state = use_state(|| Load::Loading);
+        let state = use_state({
+            let from_tile = self.from_tile.clone();
+            move || from_tile.map_or(Load::Loading, Load::Ready)
+        });
         // The line drawn in full on the map, when the user picked one.
         let shown_route = use_state::<Option<u64>>(|| None);
 
         use_hook({
             let (way_id, lat, lon, radius_m) = (self.way_id, self.lat, self.lon, self.radius_m);
             let kind = self.kind.clone();
+            let from_tile = self.from_tile.clone();
             let mut state = state;
             let mut map = transit.map.clone();
             move || {
+                if let Some(info) = from_tile {
+                    highlight_track(&mut map, &info);
+                    return;
+                }
                 spawn(async move {
                     match osm_lines::track_near(lat, lon, radius_m, kind, way_id).await {
                         Ok(info) => {
-                            let color = info
-                                .routes
-                                .first()
-                                .and_then(|route| route.color)
-                                .map_or(ACCENT, |c| rgb_or(Some(c), ACCENT));
-                            map.set_route_overlay(Some(RouteOverlay {
-                                paths: vec![OverlayPath::from_lonlat(
-                                    &info.geometry,
-                                    color,
-                                    7.0,
-                                    false,
-                                )],
-                                stops: Vec::new(),
-                            }));
+                            highlight_track(&mut map, &info);
                             state.set(Load::Ready(info));
                         }
                         Err(err) => {
@@ -93,6 +90,7 @@ impl Component for TrackView {
 
         let kind_title = match self.kind.as_str() {
             "subway" => "Metro track".to_string(),
+            "bus" | "trolleybus" => "Bus route".to_string(),
             "tram" => "Tram track".to_string(),
             "light_rail" => "Light rail track".to_string(),
             "rail" | "" => "Railway track".to_string(),
@@ -137,6 +135,15 @@ impl Component for TrackView {
     }
 }
 
+/// Draws the tapped stretch over the map, in its first line's colour.
+fn highlight_track(map: &mut map_component::MapController, info: &TrackInfo) {
+    let color = rgb_or(info.routes.first().and_then(|route| route.color), ACCENT);
+    map.set_route_overlay(Some(RouteOverlay {
+        paths: vec![OverlayPath::from_lonlat(&info.geometry, color, 7.0, false)],
+        stops: Vec::new(),
+    }));
+}
+
 fn track_header(info: &TrackInfo, kind_title: &str) -> Element {
     let title = info.name.clone().unwrap_or_else(|| kind_title.to_string());
     rect()
@@ -151,15 +158,23 @@ fn track_header(info: &TrackInfo, kind_title: &str) -> Element {
                 .color(TEXT)
                 .width(Size::fill()),
         )
-        .child(
-            label()
-                .text(match &info.operator {
-                    Some(operator) => format!("{kind_title} · {operator}"),
-                    None => kind_title.to_string(),
-                })
-                .font_size(12.0)
-                .color(TEXT_MUTED),
-        )
+        .maybe_child({
+            // The kind, unless it's already the title (no track name), then the operator.
+            let parts: Vec<&str> = [
+                info.name.is_some().then_some(kind_title),
+                info.operator.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            (!parts.is_empty()).then(|| {
+                label()
+                    .text(parts.join(" · "))
+                    .font_size(12.0)
+                    .color(TEXT_MUTED)
+                    .into_element()
+            })
+        })
         .into_element()
 }
 

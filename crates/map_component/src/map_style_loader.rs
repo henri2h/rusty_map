@@ -8,8 +8,12 @@ use super::util::tiles::{fetch_text_cached, invalidate_text_cache};
 /// which tile source and sprite sheet get fetched — see [`resolve_style`].
 const STYLE_URL: &str = "https://openmaptiles.geo.data.gouv.fr/styles/osm-bright/style.json";
 
-/// Environment variable overriding the vector tile URL template (`…/{z}/{x}/{y}…`), e.g. to use
-/// self-hosted tiles built with the OpenMapTiles schema the style expects.
+/// The app's own tiles (`tools/tiles`): the OpenMapTiles schema the style expects plus the
+/// `transit_lines` and `poi_details` layers. France only.
+const TILE_URL: &str = "https://map.carnot.cc/rusty_map/{z}/{x}/{y}";
+
+/// Environment variable overriding [`TILE_URL`] with another `…/{z}/{x}/{y}…` template in the
+/// same schema; `style` keeps the style's own source (data.gouv.fr, whole planet).
 const TILE_URL_ENV: &str = "RUSTY_MAP_TILE_URL";
 
 /// Fetches (with a permanent disk cache, like tiles) and parses the real style at [`STYLE_URL`],
@@ -70,16 +74,17 @@ async fn resolve_style(parsed: style::parser::ParsedStyle) -> StyleSpec {
         }
     }
 
-    // Self-hosted tiles in the same OpenMapTiles schema replace the style's own source.
+    // Our own tiles, in the same OpenMapTiles schema, replace the style's source.
     let tile_url_template = match std::env::var(TILE_URL_ENV) {
+        Ok(url) if url == "style" => tiles_template.unwrap_or_else(|| {
+            log::warn!("[style] no usable vector source, using default source");
+            style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
+        }),
         Ok(url) if !url.is_empty() => {
             log::info!("[style] tiles from {TILE_URL_ENV}: {url}");
             url
         }
-        _ => tiles_template.unwrap_or_else(|| {
-            log::warn!("[style] no usable vector source, using default source");
-            style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
-        }),
+        _ => TILE_URL.to_string(),
     };
 
     StyleSpec {

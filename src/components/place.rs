@@ -40,6 +40,8 @@ pub struct EnrichedDetails {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum EnrichKey {
     Details(String, u64),
+    /// Only [`online_extras`], for a POI whose tags came from the tile itself.
+    Extras(String, u64),
     Reverse(i64, i64, u32),
 }
 
@@ -184,9 +186,41 @@ fn next_place_id() -> u64 {
     NEXT_PLACE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Immediate (not-yet-enriched) place for a tapped POI. No `marker_world` — the tapped
-/// sprite/label is already drawn on the map, so no extra pin is needed.
+/// The tapped POI's OSM tags from the tile's `poi_details` layer, as the OSM API would give
+/// them (plus the `_osm_type`/`_osm_id` identity), or `None` when the tile source has no such
+/// layer.
+fn tile_tags(tap: &TappedFeature) -> Option<Vec<(String, String)>> {
+    let details = tap.details.as_ref()?;
+    let mut tags: Vec<(String, String)> = details
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "osm_type" | "osm_id"))
+        .filter_map(|(key, value)| Some((key.clone(), value_to_string(value)?)))
+        .collect();
+    if let (Some(kind), Some(id)) = (
+        details.get("osm_type").and_then(value_to_string),
+        details.get("osm_id").and_then(value_to_string),
+    ) {
+        tags.push(("_osm_type".to_string(), kind));
+        tags.push(("_osm_id".to_string(), id));
+    }
+    Some(tags)
+}
+
+/// Immediate place for a tapped POI: from the tile's own tags (fully detailed when the tile has
+/// `poi_details`). No `marker_world` — the tapped sprite/label is already drawn on the map, so
+/// no extra pin is needed.
 pub fn place_from_tap(tap: &TappedFeature) -> SelectedPlace {
+    let mut place = place_from_tap_properties(tap);
+    if let Some(tags) = tile_tags(tap) {
+        let loading = place.loading;
+        place.apply(local_details(&tags));
+        // Still loading the Wikipedia/Wikidata extras.
+        place.loading = loading;
+    }
+    place
+}
+
+fn place_from_tap_properties(tap: &TappedFeature) -> SelectedPlace {
     let (details, raw_tags) = details_from_properties(&tap.properties);
     SelectedPlace {
         id: next_place_id(),
@@ -259,6 +293,18 @@ fn is_transit_poi(properties: &Properties) -> bool {
 /// the OSM id carried by the tile when there is one; otherwise falls back to reverse-geocoding,
 /// which can resolve to the wrong nearby feature (e.g. a street) instead of the POI itself.
 pub async fn enrich_tap(cache: &EnrichCache, tap: &TappedFeature) -> EnrichedDetails {
+    // The tile already had this POI's tags (see `tile_tags`), shown right away: only the
+    // Wikipedia/Wikidata extras are left to fetch, and the OSM API isn't needed at all.
+    if let Some(tags) = tile_tags(tap) {
+        let (kind, id) = tap.osm_identity.clone().unwrap_or_default();
+        let key = EnrichKey::Extras(kind, id);
+        if let Some(cached) = cache.borrow().get(&key).cloned() {
+            return cached;
+        }
+        let extras = online_extras(&tags, false).await;
+        cache.borrow_mut().insert(key, extras.clone());
+        return extras;
+    }
     match tap.osm_identity.clone() {
         Some((osm_type, osm_id)) => {
             let key = EnrichKey::Details(osm_type.clone(), osm_id);
@@ -612,80 +658,85 @@ pub fn details_from_tags(tags: &[(String, String)]) -> DetailRows {
     (rows, raw)
 }
 
-/// [`details_from_tags`] plus:
-/// - a clickable Website link, when `website`/`contact:website` is present;
-/// - a Wikipedia intro row + a clickable "Open Wikipedia" link, when this place's own
-///   `wikipedia` OSM tag is present (`lang:Title`, e.g. `"fr:Tour Eiffel"` — deliberately not
-///   falling back to resolving a `wikidata` QID's sitelinks: if the OSM element itself doesn't
-///   link to an article, there's no text to show);
-/// - Population/Elevation/Since rows, a preview image, and a clickable Wikivoyage link, all from
-///   the place's Wikidata entity (when a `wikidata` tag is present) — independent of the
-///   `wikipedia` tag, since plenty of POIs carry one but not the other.
-///
-/// The Wikipedia-intro and Wikidata-entity fetches run concurrently (`tokio::join!`) — they're
-/// independent, both keyed off `tags` rather than each other's result — only the Commons
-/// thumbnail download stays sequential after, since it needs the Wikidata fetch's own filename.
-///
-/// Shared by the search-result (`search::fetch_osm_element`) and POI-tap (`search::fetch_reverse`)
-/// enrichment paths, which differ only in how they get `tags`.
-pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
+/// Everything derived from `tags` alone, with no network: [`details_from_tags`]'s rows, the
+/// Website / OpenStreetMap / Wikipedia links, and the heritage row.
+pub fn local_details(tags: &[(String, String)]) -> EnrichedDetails {
     use crate::components::wikipedia;
 
-    let (mut rows, raw) = details_from_tags(tags);
+    let tag = |key: &str| tags.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    let (mut rows, raw_tags) = details_from_tags(tags);
     let mut links = Vec::new();
 
-    if let Some((_, website)) = tags
-        .iter()
-        .find(|(k, _)| k == "website" || k == "contact:website")
-    {
-        links.push(("Website".to_string(), website.clone(), website.clone()));
+    if let Some(website) = tag("website").or_else(|| tag("contact:website")) {
+        links.push(("Website".to_string(), website.clone(), website));
     }
-
-    // See `search::push_osm_identity` — both `fetch_osm_element` and `fetch_reverse` stash the
-    // result's own identity this way so this one link works for either enrichment path.
-    if let (Some((_, kind)), Some((_, id))) = (
-        tags.iter().find(|(k, _)| k == "_osm_type"),
-        tags.iter().find(|(k, _)| k == "_osm_id"),
-    ) {
+    // See `search::push_osm_identity`: every enrichment path stashes the element's identity
+    // this way.
+    if let (Some(kind), Some(id)) = (tag("_osm_type"), tag("_osm_id")) {
         links.push((
             "OpenStreetMap".to_string(),
             "View on OpenStreetMap".to_string(),
             format!("https://www.openstreetmap.org/{kind}/{id}"),
         ));
     }
+    if let Some((lang, title)) = tag("wikipedia").and_then(|v| wikipedia::parse_wikipedia_tag(&v)) {
+        links.push((
+            "Wikipedia".to_string(),
+            "Open Wikipedia".to_string(),
+            wikipedia::article_url(&lang, &title),
+        ));
+    }
+    if is_monument_historique(tags) {
+        rows.push((
+            "Heritage".to_string(),
+            "Monument historique (France)".to_string(),
+        ));
+    }
 
-    let wiki_tag = tags
-        .iter()
-        .find(|(k, _)| k == "wikipedia")
-        .and_then(|(_, v)| wikipedia::parse_wikipedia_tag(v));
-    let qid = tags
-        .iter()
-        .find(|(k, _)| k == "wikidata")
-        .map(|(_, v)| v.clone());
-    let osm_image = tags
-        .iter()
-        .find(|(k, _)| k == "image")
-        .map(|(_, v)| v.clone());
-    let osm_identity = match (
-        tags.iter().find(|(k, _)| k == "_osm_type"),
-        tags.iter().find(|(k, _)| k == "_osm_id"),
-    ) {
-        (Some((_, kind)), Some((_, id))) => id.parse::<u64>().ok().map(|id| (kind.clone(), id)),
+    EnrichedDetails {
+        rows,
+        raw_tags,
+        links,
+        image: None,
+    }
+}
+
+/// [`local_details`] plus [`online_extras`] — the full enrichment for tags fetched from the
+/// OSM API or Nominatim (search results, and POIs from tiles without `poi_details`).
+pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
+    let mut details = local_details(tags);
+    let extras = online_extras(tags, true).await;
+    details.rows.extend(extras.rows);
+    details.links.extend(extras.links);
+    details.image = extras.image;
+    details
+}
+
+/// What `tags` only point to, fetched from the network, all concurrently:
+/// - the Wikipedia intro, for a `wikipedia` tag (`lang:Title`, e.g. `"fr:Tour Eiffel"` — not
+///   resolved from a `wikidata` QID's sitelinks: if the element doesn't link an article, there's
+///   no text to show);
+/// - Population/Elevation/Since rows, a preview image and a Wikivoyage link from the `wikidata`
+///   entity — independent of `wikipedia`, since plenty of POIs carry one but not the other;
+/// - the OSM `image` tag's picture (preferred over Wikidata's);
+/// - "Last edited", from the OSM API, only when `fetch_edit_info` and not already in `tags`.
+pub async fn online_extras(tags: &[(String, String)], fetch_edit_info: bool) -> EnrichedDetails {
+    use crate::components::wikipedia;
+
+    let tag = |key: &str| tags.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    let wiki_tag = tag("wikipedia").and_then(|v| wikipedia::parse_wikipedia_tag(&v));
+    let qid = tag("wikidata");
+    let osm_image = tag("image");
+    let osm_identity = match (tag("_osm_type"), tag("_osm_id")) {
+        (Some(kind), Some(id)) => id.parse::<u64>().ok().map(|id| (kind, id)),
         _ => None,
     };
-    // `search::fetch_osm_element` (the search-result/POI-tap path) piggybacks last-edited info
-    // onto its one tag-fetching request already — only `search::fetch_reverse` (Nominatim, used
-    // when no id is known upfront) needs a separate network call for it below.
-    let own_osm_meta = match (
-        tags.iter().find(|(k, _)| k == "_last_edited_timestamp"),
-        tags.iter().find(|(k, _)| k == "_last_edited_user"),
-    ) {
-        (Some((_, ts)), Some((_, user))) => Some((ts.clone(), user.clone())),
+    // `search::fetch_osm_element` piggybacks last-edited info onto its own request already.
+    let own_osm_meta = match (tag("_last_edited_timestamp"), tag("_last_edited_user")) {
+        (Some(ts), Some(user)) => Some((ts, user)),
         _ => None,
     };
 
-    // All four are independent, keyed only off `tags` (not off each other's result), so they
-    // run concurrently rather than as four sequential round trips.
     let intro_fut = async {
         match &wiki_tag {
             Some((lang, title)) => wikipedia::fetch_intro(title.clone(), lang.clone())
@@ -708,8 +759,8 @@ pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
         }
     };
     let osm_meta_fut = async {
-        if own_osm_meta.is_some() {
-            return None; // already have it, see `own_osm_meta` above.
+        if own_osm_meta.is_some() || !fetch_edit_info {
+            return None;
         }
         match &osm_identity {
             Some((kind, id)) => search::fetch_osm_element_meta(kind.clone(), *id)
@@ -722,31 +773,16 @@ pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
     let (intro, wikidata_info, mut image, osm_meta) =
         tokio::join!(intro_fut, wikidata_fut, osm_image_fut, osm_meta_fut);
 
+    let mut rows = Vec::new();
+    let mut links = Vec::new();
     if let Some(extract) = intro {
         rows.push(("Wikipedia".to_string(), extract));
     }
-    if let Some((lang, title)) = &wiki_tag {
-        links.push((
-            "Wikipedia".to_string(),
-            "Open Wikipedia".to_string(),
-            wikipedia::article_url(lang, title),
-        ));
-    }
-
-    if is_monument_historique(tags) {
-        rows.push((
-            "Heritage".to_string(),
-            "Monument historique (France)".to_string(),
-        ));
-    }
-
     if let Some((timestamp, user)) = own_osm_meta.or(osm_meta) {
-        // Wikidata time values are full ISO instants ("2023-08-09T14:02:11Z"); the date alone
-        // is what's actually useful in a one-line row.
+        // The date alone is what's useful in a one-line row.
         let date = timestamp.split('T').next().unwrap_or(&timestamp);
         rows.push(("Last edited".to_string(), format!("{date} by {user}")));
     }
-
     if let Some(info) = wikidata_info {
         if let Some(population) = info.population {
             rows.push(("Population".to_string(), population.to_string()));
@@ -754,18 +790,17 @@ pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
         if let Some(elevation) = info.elevation_m {
             rows.push(("Elevation".to_string(), format!("{elevation} m")));
         }
-        // Don't duplicate a "Since" row the OSM `start_date` tag already produced above.
+        // Don't duplicate a "Since" row the OSM `start_date` tag already produced.
         if let Some(year) = info.inception_year.clone()
-            && !rows.iter().any(|(label, _)| label == "Since")
+            && tag("start_date").is_none()
         {
             rows.push(("Since".to_string(), year));
         }
         if let Some(url) = info.wikivoyage_url() {
             links.push(("Wikivoyage".to_string(), "Open Wikivoyage".to_string(), url));
         }
-        // The OSM `image` tag (already tried above) wins when present — it's the mapper's own
-        // pick for this specific feature, where Wikidata's P18 is often just "some photo of the
-        // general topic". Only fall back to Wikidata's image when OSM's tag was absent/failed.
+        // The OSM `image` tag wins when present — the mapper's own pick for this feature, where
+        // Wikidata's P18 is often just "some photo of the general topic".
         if image.is_none()
             && let Some(filename) = info.image_filename
         {
@@ -778,7 +813,7 @@ pub async fn enrich_from_tags(tags: &[(String, String)]) -> EnrichedDetails {
 
     EnrichedDetails {
         rows,
-        raw_tags: raw,
+        raw_tags: Vec::new(),
         links,
         image,
     }

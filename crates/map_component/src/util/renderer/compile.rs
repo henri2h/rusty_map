@@ -56,6 +56,9 @@ pub struct CompiledTile {
     /// Rail/transit line features with their raw coordinates, for tap hit-testing — only filled
     /// when the style asks for it (`StyleSpec::pick_transit_lines`).
     pub transit_lines: Vec<TransitLine>,
+    /// `poi_details` features (rusty_map's own tiles only), by `(N|W|R, osm id)` — the same
+    /// identity a `poi` feature's id decodes to.
+    pub poi_details: rustc_hash::FxHashMap<(char, u64), std::sync::Arc<Properties>>,
     /// Text labels extracted from this tile's symbol layers — text already evaluated and
     /// transformed, anchors in normalized tile coords. Drawn per-frame in screen space by the
     /// paint loop's label pass (never baked into the bitmap, so text size stays constant on
@@ -69,6 +72,9 @@ pub struct CompiledTile {
 pub struct ZoomDependentEntry {
     pub style_index: usize,
     pub path: Path,
+    /// For a layer whose color depends on the feature (`ColorExpr::is_data_driven`): one of the
+    /// features merged into `path`, all of which share that color. `None` otherwise.
+    pub properties: Option<std::sync::Arc<Properties>>,
 }
 
 /// One ready-to-place text label: everything zoom-independent resolved at compile time.
@@ -122,22 +128,64 @@ pub struct TransitLine {
     pub properties: std::sync::Arc<Properties>,
     /// See `RenderableFeature::id`'s doc comment.
     pub feature_id: Option<u64>,
+    /// From the `transit_lines` layer, so `properties` already names the lines using it
+    /// (`route_<n>_*`); otherwise a bare `transportation` track.
+    pub has_routes: bool,
 }
 
 fn extract_transit_lines(tile: &RenderableTile) -> Vec<TransitLine> {
-    let Some(features) = tile.source_layers.get(super::TRANSIT_SOURCE_LAYER) else {
-        return Vec::new();
-    };
-    features
-        .iter()
+    let tracks = tile
+        .source_layers
+        .get(super::TRANSIT_SOURCE_LAYER)
+        .into_iter()
+        .flatten()
         .filter(|feature| super::is_transit_line(&feature.properties))
-        .filter_map(|feature| {
+        .map(|feature| (feature, false));
+    let routes = tile
+        .source_layers
+        .get(super::ROUTE_LINES_LAYER)
+        .into_iter()
+        .flatten()
+        .map(|feature| (feature, true));
+    tracks
+        .chain(routes)
+        .filter_map(|(feature, has_routes)| {
             Some(TransitLine {
                 // Owned copy: compiled tiles cross threads, the source `Rc` can't.
                 coords: feature.line_coords.as_deref()?.clone(),
                 properties: feature.properties.clone(),
                 feature_id: feature.id,
+                has_routes,
             })
+        })
+        .collect()
+}
+
+fn extract_poi_details(
+    tile: &RenderableTile,
+) -> rustc_hash::FxHashMap<(char, u64), std::sync::Arc<Properties>> {
+    use mvt_reader::feature::Value;
+    let Some(features) = tile.source_layers.get(super::POI_DETAILS_LAYER) else {
+        return Default::default();
+    };
+    features
+        .iter()
+        .filter_map(|feature| {
+            let kind = match feature.properties.get("osm_type") {
+                Some(Value::String(kind)) => match kind.as_str() {
+                    "node" => 'N',
+                    "way" => 'W',
+                    "relation" => 'R',
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let id = match feature.properties.get("osm_id")? {
+                Value::Int(id) | Value::SInt(id) => u64::try_from(*id).ok()?,
+                Value::UInt(id) => *id,
+                _ => return None,
+            };
+            Some(((kind, id), feature.properties.clone()))
         })
         .collect()
 }
@@ -237,7 +285,7 @@ pub fn compile_tile(tile: &RenderableTile, style: &StyleSpec, zoom_z: u32) -> Co
                         .is_none_or(|f| f.eval(&feature.properties))
                         .then_some((path, feature))
                 });
-                record_line_layer(matched, &mut zoom_dependent, style_index);
+                record_line_layer(matched, line_layer, zoom, &mut zoom_dependent, style_index);
             }
         }
     }
@@ -265,6 +313,7 @@ pub fn compile_tile(tile: &RenderableTile, style: &StyleSpec, zoom_z: u32) -> Co
         labels,
         pois: extract_pois(tile, style.poi_filter.as_ref()),
         transit_lines: extract_transit_lines(tile),
+        poi_details: extract_poi_details(tile),
     }
 }
 
@@ -383,6 +432,7 @@ pub fn rasterize_cell(
             canvas,
             &style.layers[entry.style_index],
             &entry.path,
+            entry.properties.as_deref(),
             zoom,
             stroke_scale,
             &mut fill_paint,
@@ -422,6 +472,7 @@ pub fn rasterize_zoom_dependent(
             canvas,
             &style.layers[entry.style_index],
             &entry.path,
+            entry.properties.as_deref(),
             zoom,
             stroke_scale,
             &mut fill_paint,

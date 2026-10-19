@@ -703,7 +703,7 @@ impl IntoStaticColor for ColorExpr {
                 .map(|(_, c)| *c)
                 .unwrap_or(freya::engine::prelude::Color::TRANSPARENT),
             ColorExpr::ZoomStep { default, .. } => default,
-            ColorExpr::Match { default, .. } => default,
+            ColorExpr::Match { default, .. } | ColorExpr::Property { default, .. } => default,
         }
     }
 }

@@ -199,6 +199,9 @@ pub enum ColorExpr {
         default: Color,
         stops: Vec<(f64, Color)>,
     },
+    /// The color written in a feature property (`"#ffbe00"`), e.g. a transit line's own
+    /// `route_1_colour`; `default` when absent or unparsable.
+    Property { key: String, default: Color },
 }
 
 #[derive(Clone)]
@@ -293,7 +296,16 @@ impl ColorExpr {
                 .map_or(*default, |(_, c)| *c),
             ColorExpr::ZoomInterp(stops) => interp_color(stops, zoom),
             ColorExpr::ZoomStep { default, stops } => step(*default, stops, zoom),
+            ColorExpr::Property { key, default } => props
+                .get(key)
+                .and_then(|value| parse_color_str(value_as_str(value)))
+                .unwrap_or(*default),
         }
+    }
+
+    /// `true` when the color depends on the feature, not only on zoom.
+    pub fn is_data_driven(&self) -> bool {
+        matches!(self, ColorExpr::Match { .. } | ColorExpr::Property { .. })
     }
 }
 

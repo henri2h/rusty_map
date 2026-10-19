@@ -95,6 +95,8 @@ pub fn build_renderable_tile(decoded: DecodedTile, style: &StyleSpec) -> Rendera
         .map(|(layer, features)| {
             let keep_line_coords = if line_label_sources.contains(layer.name.as_str()) {
                 KeepCoords::All
+            } else if style.pick_transit_lines && layer.name == ROUTE_LINES_LAYER {
+                KeepCoords::All
             } else if style.pick_transit_lines && layer.name == TRANSIT_SOURCE_LAYER {
                 KeepCoords::TransitOnly
             } else {
@@ -112,6 +114,13 @@ pub fn build_renderable_tile(decoded: DecodedTile, style: &StyleSpec) -> Rendera
 
 /// OpenMapTiles' source layer holding rail/transit (and road) line geometry.
 pub const TRANSIT_SOURCE_LAYER: &str = "transportation";
+
+/// rusty_map's own tiles (`tools/tiles`): transit lines with the lines using them
+/// (`route_<n>_ref`/`_colour`/`_name`/…). Absent from other tile sources.
+pub const ROUTE_LINES_LAYER: &str = "transit_lines";
+
+/// rusty_map's own tiles: a POI's detail tags, keyed by `osm_type`/`osm_id`.
+pub const POI_DETAILS_LAYER: &str = "poi_details";
 
 /// `transportation` classes a tap can select as a transit line.
 pub const TRANSIT_LINE_CLASSES: &[&str] = &["rail", "transit"];

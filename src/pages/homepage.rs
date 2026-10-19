@@ -101,6 +101,7 @@ impl Component for HomePage {
             .child(ZoomBadge {
                 zoom: controller.zoom,
             })
+            .child(Attribution {})
             .child(TransitToggle {
                 transit: controller.transit,
             })
@@ -216,6 +217,38 @@ impl Component for ZoomBadge {
                     .color(Color::from_rgb(60, 60, 60))
                     .font_size(12.0),
             )
+    }
+}
+
+/// Credits for the map data, bottom-right, as the OpenStreetMap (ODbL) and OpenMapTiles licences
+/// require. Each name links to its copyright page.
+#[derive(PartialEq)]
+struct Attribution {}
+
+impl Component for Attribution {
+    fn render(&self) -> impl IntoElement {
+        let link = |text: &'static str, url: &'static str| {
+            label()
+                .text(text)
+                .font_size(11.0)
+                .color(Color::from_rgb(60, 60, 60))
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |_: Event<PressEventData>| Platform::get().open_url(url))
+        };
+
+        rect()
+            .position(Position::new_absolute().bottom(0.).right(0.))
+            .layer(Layer::Overlay)
+            .horizontal()
+            .spacing(8.0)
+            .padding((2.0f32, 8.0f32))
+            .corner_radius((6.0f32, 0.0f32, 0.0f32, 0.0f32))
+            .background(Color::from_argb(200, 255, 255, 255))
+            .child(link("© OpenMapTiles", "https://openmaptiles.org/"))
+            .child(link(
+                "© OpenStreetMap contributors",
+                "https://www.openstreetmap.org/copyright",
+            ))
     }
 }
 

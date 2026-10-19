@@ -29,6 +29,9 @@ pub struct TappedFeature {
     pub osm_identity: Option<(String, u64)>,
     pub lon: f64,
     pub lat: f64,
+    /// The POI's detail tags from the tile's `poi_details` layer (rusty_map's own tiles only),
+    /// so the host can show them without fetching the OSM element.
+    pub details: Option<Properties>,
 }
 
 /// A tap on empty map, with where it landed.
@@ -47,6 +50,8 @@ pub struct TappedLine {
     pub osm_way_id: Option<u64>,
     pub lon: f64,
     pub lat: f64,
+    /// The tapped stretch as `(lon, lat)` points, to highlight it.
+    pub path: Vec<(f64, f64)>,
     /// Ground distance (meters) the tap tolerance covers at the current zoom — how far from
     /// (`lat`, `lon`) the tapped line can be.
     pub hit_radius_m: f64,
@@ -242,6 +247,10 @@ pub fn build_on_global_pointer_up(
                     let hit_y = (hit.rect.top + hit.rect.bottom) / 2.0;
                     let (world_x, world_y) = viewport.screen_to_world(hit_x, hit_y);
                     let (lon, lat) = world_to_lonlat(world_x, world_y);
+                    let osm_identity = hit.feature_id.and_then(poi_lookup::decode_feature_id);
+                    let details = osm_identity.as_ref().and_then(|identity| {
+                        find_poi_details(&tile_cache, &viewport, viewport_size.peek().size, identity)
+                    });
                     if let Some(handler) = &on_place_tapped {
                         handler.call(TappedFeature {
                             title: hit.text.clone(),
@@ -249,9 +258,10 @@ pub fn build_on_global_pointer_up(
                             // The tile already downloaded for rendering may carry the feature's
                             // own OSM id (see `renderer::RenderableFeature::id`) — no network
                             // round trip needed to resolve it.
-                            osm_identity: hit.feature_id.and_then(poi_lookup::decode_feature_id),
+                            osm_identity,
                             lon,
                             lat,
+                            details,
                         });
                     }
                 }
@@ -263,9 +273,10 @@ pub fn build_on_global_pointer_up(
 
                     if style.pick_transit_lines
                         && let Some(handler) = &on_line_tapped
-                        && let Some((properties, feature_id)) = hit_transit_line(
+                        && let Some(hit) = hit_transit_line(
                             &tile_cache,
                             &viewport,
+                            *zoom.peek(),
                             viewport_size.peek().size,
                             (pos.x as f32, pos.y as f32),
                         )
@@ -275,10 +286,11 @@ pub fn build_on_global_pointer_up(
                             / (super::util::renderer::TILE_SIZE as f64
                                 * 2f64.powf(*zoom.peek() as f64));
                         handler.call(TappedLine {
-                            properties,
-                            osm_way_id: feature_id.and_then(poi_lookup::decode_line_way_id),
+                            properties: hit.properties,
+                            osm_way_id: hit.feature_id.and_then(poi_lookup::decode_line_way_id),
                             lon,
                             lat,
+                            path: hit.path,
                             hit_radius_m: (LINE_HIT_RADIUS_PX as f64 * meters_per_px).max(8.0),
                         });
                         return;
@@ -342,53 +354,118 @@ pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 
     }
 }
 
+struct LineHit {
+    properties: Properties,
+    feature_id: Option<u64>,
+    /// The hit polyline as `(lon, lat)`.
+    path: Vec<(f64, f64)>,
+}
+
+/// Loaded, visible tiles with their screen origin.
+fn visible_tiles<'a>(
+    cache: &'a lru::LruCache<super::util::tiles::TileKey, TileState>,
+    viewport: &Viewport,
+    viewport_size: torin::geometry::Size2D,
+) -> Vec<(&'a super::util::renderer::CompiledTile, (f32, f32))> {
+    let (tile_x_min, tile_x_max, tile_y_min, tile_y_max) = viewport.tile_range(viewport_size);
+    let mut tiles = Vec::new();
+    for tile_y in tile_y_min..tile_y_max {
+        for tile_x in tile_x_min..tile_x_max {
+            if let Some(key) = viewport.tile_key(tile_x, tile_y)
+                && let Some(TileState::Loaded(tile)) = cache.peek(&key)
+            {
+                tiles.push((tile.as_ref(), viewport.screen_pos(tile_x, tile_y)));
+            }
+        }
+    }
+    tiles
+}
+
 /// The rail/transit line closest to screen point `pos`, within [`LINE_HIT_RADIUS_PX`], among
-/// the loaded visible tiles' `transit_lines`.
+/// the loaded visible tiles' `transit_lines`. A line that names its routes (`transit_lines`
+/// layer) wins over a bare track drawn under it.
 fn hit_transit_line(
     tile_cache: &TileCache,
     viewport: &Viewport,
+    zoom: f32,
     viewport_size: torin::geometry::Size2D,
     pos: (f32, f32),
-) -> Option<(Properties, Option<u64>)> {
-    let (tile_x_min, tile_x_max, tile_y_min, tile_y_max) = viewport.tile_range(viewport_size);
+) -> Option<LineHit> {
     let cache = tile_cache.borrow();
     let margin = LINE_HIT_RADIUS_PX / viewport.tile_px;
-    let mut best: Option<(f32, &TransitLine)> = None;
-    for tile_y in tile_y_min..tile_y_max {
-        for tile_x in tile_x_min..tile_x_max {
-            let Some(key) = viewport.tile_key(tile_x, tile_y) else {
-                continue;
-            };
-            let Some(TileState::Loaded(tile)) = cache.peek(&key) else {
-                continue;
-            };
-            let (screen_x, screen_y) = viewport.screen_pos(tile_x, tile_y);
-            // The tap in this tile's normalized coordinates.
-            let local = (
-                (pos.0 - screen_x) / viewport.tile_px,
-                (pos.1 - screen_y) / viewport.tile_px,
-            );
-            if !(-margin..=1.0 + margin).contains(&local.0)
-                || !(-margin..=1.0 + margin).contains(&local.1)
+    // Rank (no routes, bus, distance) — lower is better: a line naming its routes, then rail over
+    // the bus lines running in the streets around it — then the line, its hit polyline, and
+    // the tile's screen origin.
+    type Candidate<'a> = ((bool, bool, f32), &'a TransitLine, &'a Vec<(f32, f32)>, (f32, f32));
+    let mut best: Option<Candidate> = None;
+    for (tile, origin) in visible_tiles(&cache, viewport, viewport_size) {
+        // The tap in this tile's normalized coordinates.
+        let local = (
+            (pos.0 - origin.0) / viewport.tile_px,
+            (pos.1 - origin.1) / viewport.tile_px,
+        );
+        if !(-margin..=1.0 + margin).contains(&local.0)
+            || !(-margin..=1.0 + margin).contains(&local.1)
+        {
+            continue;
+        }
+        for line in &tile.transit_lines {
+            if is_bus(&line.properties)
+                && (zoom as f64) < crate::style::transit::BUS_LINES_MIN_ZOOM
             {
                 continue;
             }
-            for line in &tile.transit_lines {
-                for polyline in &line.coords {
-                    for segment in polyline.windows(2) {
-                        let distance = point_segment_distance(local, segment[0], segment[1])
-                            * viewport.tile_px;
-                        if distance <= LINE_HIT_RADIUS_PX
-                            && best.is_none_or(|(best_distance, _)| distance < best_distance)
-                        {
-                            best = Some((distance, line));
-                        }
+            for polyline in &line.coords {
+                for segment in polyline.windows(2) {
+                    let distance =
+                        point_segment_distance(local, segment[0], segment[1]) * viewport.tile_px;
+                    let rank = (!line.has_routes, is_bus(&line.properties), distance);
+                    if distance <= LINE_HIT_RADIUS_PX
+                        && best.is_none_or(|(best_rank, ..)| rank < best_rank)
+                    {
+                        best = Some((rank, line, polyline, origin));
                     }
                 }
             }
         }
     }
-    best.map(|(_, line)| ((*line.properties).clone(), line.feature_id))
+    best.map(|(_, line, polyline, origin)| LineHit {
+        properties: (*line.properties).clone(),
+        feature_id: line.feature_id,
+        path: polyline
+            .iter()
+            .map(|(x, y)| {
+                let (world_x, world_y) = viewport.screen_to_world(
+                    origin.0 + x * viewport.tile_px,
+                    origin.1 + y * viewport.tile_px,
+                );
+                world_to_lonlat(world_x, world_y)
+            })
+            .collect(),
+    })
+}
+
+/// `true` for a `transit_lines` stretch whose main line is a bus.
+fn is_bus(properties: &Properties) -> bool {
+    matches!(
+        properties.get("mode"),
+        Some(mvt_reader::feature::Value::String(mode)) if mode == "bus" || mode == "trolleybus"
+    )
+}
+
+/// The `poi_details` entry for the OSM element `(type, id)` in any loaded visible tile.
+fn find_poi_details(
+    tile_cache: &TileCache,
+    viewport: &Viewport,
+    viewport_size: torin::geometry::Size2D,
+    (osm_type, osm_id): &(String, u64),
+) -> Option<Properties> {
+    let kind = osm_type.chars().next()?;
+    let cache = tile_cache.borrow();
+    visible_tiles(&cache, viewport, viewport_size)
+        .into_iter()
+        .find_map(|(tile, _)| tile.poi_details.get(&(kind, *osm_id)))
+        .map(|properties| (**properties).clone())
 }
 
 fn point_segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {

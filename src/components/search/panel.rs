@@ -217,6 +217,7 @@ fn transit_view(view: TransitView, transit: TransitController) -> Element {
             lon,
             radius_m,
             kind,
+            from_tile,
         } => TrackView {
             id,
             way_id,
@@ -224,6 +225,7 @@ fn transit_view(view: TransitView, transit: TransitController) -> Element {
             lon,
             radius_m,
             kind,
+            from_tile,
         }
         .into_element(),
         TransitView::Trip {
@@ -782,6 +784,18 @@ fn wikipedia_block(intro: String) -> impl IntoElement {
                         .text("From Wikipedia")
                         .font_size(11.0)
                         .color(TEXT_FAINT),
+                )
+                // The intro's licence, which reusing Wikipedia text requires showing.
+                .child(
+                    label()
+                        .text("CC BY-SA 4.0")
+                        .font_size(11.0)
+                        .color(TEXT_FAINT)
+                        .cursor(CursorIcon::Pointer)
+                        .on_press(|_: Event<PressEventData>| {
+                            Platform::get()
+                                .open_url("https://creativecommons.org/licenses/by-sa/4.0/")
+                        }),
                 ),
         )
         .child(

@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use freya::prelude::*;
 use map_component::{MapController, TappedLine};
 
-use super::api::Departure;
+use super::{
+    api::Departure,
+    osm_lines::{TrackInfo, routes_from_tile},
+};
 
 /// One end of a planned journey.
 #[derive(Clone, PartialEq)]
@@ -36,6 +39,9 @@ pub enum TransitView {
         /// `transportation` subclass from the tile (`subway`, `tram`, `rail`), shown while the
         /// OSM lookup runs or when it finds nothing.
         kind: String,
+        /// The lines using the track, straight from rusty_map's own tiles (`transit_lines`):
+        /// no lookup needed. `None` with other tile sources.
+        from_tile: Option<TrackInfo>,
     },
     /// One vehicle's run, opened from a departure row at stop `from_stop`.
     Trip {
@@ -90,10 +96,22 @@ impl TransitController {
     }
 
     pub fn show_track(&mut self, line: &TappedLine) {
-        let kind = match line.properties.get("subclass") {
-            Some(mvt_reader::feature::Value::String(kind)) => kind.clone(),
-            _ => String::new(),
+        let text = |key: &str| match line.properties.get(key) {
+            Some(mvt_reader::feature::Value::String(value)) => Some(value.clone()),
+            _ => None,
         };
+        // `transit_lines` names its `mode` after the route (`train`); tracks use `rail`.
+        let kind = text("subclass")
+            .or_else(|| text("mode").map(|mode| if mode == "train" { "rail".into() } else { mode }))
+            .unwrap_or_default();
+        let routes = routes_from_tile(&line.properties);
+        let from_tile = (!routes.is_empty()).then(|| TrackInfo {
+            name: None,
+            railway: Some(kind.clone()),
+            operator: None,
+            geometry: line.path.clone(),
+            routes,
+        });
         self.map.set_route_overlay(None);
         self.view.set(Some(TransitView::Track {
             id: next_view_id(),
@@ -102,6 +120,7 @@ impl TransitController {
             lon: line.lon,
             radius_m: line.hit_radius_m,
             kind,
+            from_tile,
         }));
     }
 
