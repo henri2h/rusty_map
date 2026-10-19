@@ -6,7 +6,7 @@ use map_component::{
     util::viewport::lonlat_to_world,
 };
 
-use super::favorites::FavoritesPage;
+use super::{favorites::FavoritesPage, settings::SettingsPage};
 
 use crate::{
     location::{self, Reading},
@@ -39,6 +39,7 @@ impl Component for HomePage {
         use_remembered_view(&controller);
         use_provide_screen(controller.viewport_size);
         let layers_open = use_state(|| false);
+        let settings_open = use_state(|| false);
         let layers = vec![
             MapLayer {
                 name: "Transport",
@@ -225,6 +226,12 @@ impl Component for HomePage {
                 places,
                 search,
             })
+            .child(SettingsButton {
+                open: settings_open,
+            })
+            .child(SettingsPage {
+                open: settings_open,
+            })
             .child(LayersModal {
                 layers,
                 open: layers_open,
@@ -381,6 +388,56 @@ impl Component for Attribution {
                 "© OpenStreetMap contributors",
                 "https://www.openstreetmap.org/copyright",
             ))
+    }
+}
+
+/// Map control opening the settings page (about, data attribution), under Favorites.
+#[derive(PartialEq)]
+struct SettingsButton {
+    open: State<bool>,
+}
+
+impl Component for SettingsButton {
+    fn render(&self) -> impl IntoElement {
+        let screen = use_screen();
+        let mut open = self.open;
+        rect()
+            .position(
+                Position::new_absolute()
+                    .top(92. + screen.controls_top())
+                    .right(12.),
+            )
+            .layer(Layer::Overlay)
+            .padding((6.0f32, 12.0f32))
+            .corner_radius(16.0f32)
+            .background(Color::from_argb(235, 255, 255, 255))
+            .shadow((
+                0.0f32,
+                1.0f32,
+                4.0f32,
+                0.0f32,
+                Color::from_argb(60, 0, 0, 0),
+            ))
+            .cursor(CursorIcon::Pointer)
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .spacing(6.0)
+            .on_press(move |_: Event<PressEventData>| {
+                haptic(Haptic::Press);
+                open.set(true);
+            })
+            .child(
+                SvgViewer::new(lucide::settings())
+                    .width(Size::px(15.))
+                    .height(Size::px(15.))
+                    .color(Color::from_rgb(60, 60, 60)),
+            )
+            .child(
+                label()
+                    .text("Settings")
+                    .font_size(13.0)
+                    .color(Color::from_rgb(60, 60, 60)),
+            )
     }
 }
 

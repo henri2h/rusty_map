@@ -8,8 +8,8 @@ mod ui;
 mod views;
 mod when;
 
-pub use api::Mode;
 pub(crate) use api::days_from_civil;
+pub use api::{Mode, SOURCES_URL};
 pub use controller::{Endpoint, Field, TransitController, TransitView};
 pub use departures::{Departures, NextTimes};
 pub use planner::Planner;
