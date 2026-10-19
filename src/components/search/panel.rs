@@ -35,7 +35,7 @@ use crate::{
         place::{PlaceController, SelectedPlace, humanize},
         transit::{
             Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
-            TripView,
+            TripView, central_european_offset,
         },
     },
     mobile::{
@@ -46,7 +46,7 @@ use crate::{
 };
 
 use super::{
-    opening_hours::parse_opening_hours,
+    opening_hours::{OpenStatus, open_status, parse_opening_hours, when_text},
     search_controller::{SearchController, SearchStatus},
     util::search::{self, SearchResult},
 };
@@ -73,6 +73,9 @@ const ACCENT: Color = Color::from_rgb(26, 115, 232);
 const DIVIDER: Color = Color::from_rgb(232, 234, 237);
 const SURFACE_ALT: Color = Color::from_rgb(244, 246, 248);
 const STAR: Color = Color::from_rgb(242, 153, 0);
+const OPEN: Color = Color::from_rgb(24, 128, 56);
+const CLOSING_SOON: Color = Color::from_rgb(227, 116, 0);
+const CLOSED: Color = Color::from_rgb(197, 34, 31);
 
 #[derive(PartialEq)]
 pub struct SearchPanel {
@@ -1179,6 +1182,7 @@ fn opening_hours_row(value: String) -> impl IntoElement {
             .vertical()
             .width(Size::fill())
             .spacing(2.0)
+            .child(OpenNow { raw: value })
             .children(rules.into_iter().map(|rule| {
                 rect()
                     .horizontal()
@@ -1207,6 +1211,86 @@ fn opening_hours_row(value: String) -> impl IntoElement {
                     .color(TEXT_FAINT),
             ),
     )
+}
+
+/// Open, closing soon or closed right now (French local time, as transit times), from the raw
+/// `opening_hours`; nothing when it isn't understood. Rechecked every half minute while shown.
+#[derive(PartialEq)]
+struct OpenNow {
+    raw: String,
+}
+
+/// Minutes since Monday 00:00, French local time (see `transit::ui::clock_time`).
+fn local_week_minute() -> u32 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let local = unix + central_european_offset(unix);
+    // 1970-01-01 was a Thursday: day 0 is Monday-based index 3.
+    let weekday = (local.div_euclid(86_400) + 3).rem_euclid(7);
+    (weekday * 24 * 60 + local.rem_euclid(86_400) / 60) as u32
+}
+
+impl Component for OpenNow {
+    fn render(&self) -> impl IntoElement {
+        let mut now = use_state(local_week_minute);
+        // Tied to this component's scope: stops with the place's details.
+        use_hook(move || {
+            spawn(async move {
+                loop {
+                    background_delay(Duration::from_secs(30)).await;
+                    let minute = local_week_minute();
+                    if *now.peek() != minute {
+                        now.set(minute);
+                    }
+                }
+            });
+        });
+        let now = *now.read();
+
+        let Some(status) = open_status(&self.raw, now) else {
+            return rect().into_element();
+        };
+        let (state, detail, color) = match status {
+            OpenStatus::AlwaysOpen => ("Open 24 hours", None, OPEN),
+            OpenStatus::Open { closes } => (
+                "Open",
+                Some(format!("closes {}", when_text(closes, now))),
+                OPEN,
+            ),
+            OpenStatus::ClosingSoon { closes } => (
+                "Closing soon",
+                Some(format!("closes {}", when_text(closes, now))),
+                CLOSING_SOON,
+            ),
+            OpenStatus::Closed { opens } => (
+                "Closed",
+                opens.map(|opens| format!("opens {}", when_text(opens, now))),
+                CLOSED,
+            ),
+        };
+
+        rect()
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .spacing(6.0)
+            .margin((0.0f32, 0.0f32, 4.0f32, 0.0f32))
+            .child(
+                label()
+                    .text(state)
+                    .font_size(text_size(13.0))
+                    .font_weight(FontWeight::BOLD)
+                    .color(color),
+            )
+            .maybe_child(detail.map(|detail| {
+                label()
+                    .text(format!("· {detail}"))
+                    .font_size(text_size(13.0))
+                    .color(TEXT_MUTED)
+                    .into_element()
+            }))
+            .into_element()
+    }
 }
 
 fn wikipedia_block(intro: String) -> impl IntoElement {
