@@ -11,6 +11,8 @@ use serde::Deserialize;
 
 use map_component::util::tiles::{FetchError, background_runtime, client};
 
+use super::when::When;
+
 const API: &str = "https://api.transitous.org/api";
 
 /// Transitous asks for app name, version and a contact in every request's User-Agent.
@@ -90,6 +92,7 @@ pub async fn departures_near(
     lat: f64,
     lon: f64,
     name: String,
+    when: When,
 ) -> Result<Option<StopDepartures>, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     background_runtime().spawn(async move {
@@ -97,7 +100,7 @@ pub async fn departures_near(
             let Some(stop) = find_stop(lat, lon, &name).await? else {
                 return Ok(None);
             };
-            let departures = fetch_departures(&stop.id).await?;
+            let departures = fetch_departures(&stop.id, when).await?;
             Ok(Some(StopDepartures { stop, departures }))
         }
         .await;
@@ -247,15 +250,15 @@ struct StopTimePlace {
     pickup_type: Option<String>,
 }
 
-async fn fetch_departures(stop_id: &str) -> Result<Vec<Departure>, FetchError> {
-    let response: StopTimesResponse = get_json(
-        "/v6/stoptimes",
-        &[
-            ("stopId", stop_id.to_string()),
-            ("n", DEPARTURE_COUNT.to_string()),
-        ],
-    )
-    .await?;
+/// The next departures from `stop_id`, from now or from `when`'s time.
+async fn fetch_departures(stop_id: &str, when: When) -> Result<Vec<Departure>, FetchError> {
+    let mut query = vec![
+        ("stopId", stop_id.to_string()),
+        ("n", DEPARTURE_COUNT.to_string()),
+    ];
+    // A board lists departures, so only the time is used, never `arriveBy`.
+    query.extend(when.query().into_iter().filter(|(key, _)| *key == "time"));
+    let response: StopTimesResponse = get_json("/v6/stoptimes", &query).await?;
     Ok(response
         .stop_times
         .into_iter()

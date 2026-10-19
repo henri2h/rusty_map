@@ -13,6 +13,7 @@ use super::{
         DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, icon, line_badge,
         status_line,
     },
+    when::{When, WhenPicker},
 };
 
 /// Departures are realtime estimates; refetch this often while the drawer shows them.
@@ -29,9 +30,9 @@ enum Load {
     Failed,
 }
 
-/// Next departures from the stop at (`lat`, `lon`), named `name` on the map. Keyed by the
-/// selected place's id, so selecting another stop starts a fresh fetch instead of showing the
-/// previous stop's departures while it loads.
+/// Next departures from the stop at (`lat`, `lon`), named `name` on the map — from now, or from
+/// a chosen date and time. Keyed by the selected place's id, so selecting another stop starts
+/// over (back to "now") instead of showing the previous stop's departures while it loads.
 #[derive(PartialEq)]
 pub struct Departures {
     pub place_id: u64,
@@ -42,6 +43,35 @@ pub struct Departures {
 
 impl Component for Departures {
     fn render(&self) -> impl IntoElement {
+        let when = use_state(When::default);
+        DepartureBoard {
+            place_id: self.place_id,
+            lat: self.lat,
+            lon: self.lon,
+            name: self.name.clone(),
+            when: *when.read(),
+            when_state: when,
+        }
+    }
+
+    fn render_key(&self) -> DiffKey {
+        crate::components::place::section_key("departures", self.place_id)
+    }
+}
+
+/// [`Departures`] for one `when`: keyed by it, so another choice starts a fresh fetch loop.
+#[derive(PartialEq)]
+struct DepartureBoard {
+    place_id: u64,
+    lat: f64,
+    lon: f64,
+    name: String,
+    when: When,
+    when_state: State<When>,
+}
+
+impl Component for DepartureBoard {
+    fn render(&self) -> impl IntoElement {
         let state = use_state(|| Load::Loading);
         let transit = use_consume::<TransitController>();
         let platform = use_hook(|| Platform::get().current_window());
@@ -49,12 +79,12 @@ impl Component for Departures {
         // Lives as long as this section is shown: the task is tied to this component's scope,
         // so closing the drawer or selecting another place stops the refresh loop.
         use_hook({
-            let (lat, lon, name) = (self.lat, self.lon, self.name.clone());
+            let (lat, lon, name, when) = (self.lat, self.lon, self.name.clone(), self.when);
             let mut state = state;
             move || {
                 spawn(async move {
                     loop {
-                        let next = match api::departures_near(lat, lon, name.clone()).await {
+                        let next = match api::departures_near(lat, lon, name.clone(), when).await {
                             Ok(Some(found)) => Load::Ready(found),
                             Ok(None) => Load::NoStop,
                             Err(err) => {
@@ -147,12 +177,25 @@ impl Component for Departures {
                     .child(icon(lucide::clock(), TEXT_MUTED, 16.0))
                     .child(
                         label()
-                            .text("Next departures")
+                            .text(if self.when == When::Now {
+                                "Next departures"
+                            } else {
+                                "Departures"
+                            })
                             .width(Size::flex(1.0))
                             .font_size(13.0)
                             .font_weight(FontWeight::BOLD)
                             .color(TEXT),
                     ),
+            )
+            .child(
+                rect()
+                    .margin((0.0f32, 0.0f32, 6.0f32, 0.0f32))
+                    .child(WhenPicker {
+                        when: self.when_state,
+                        allow_arrive: false,
+                        icon: false,
+                    }),
             )
             // Transitous' own name for the stop, when it differs from the map's — confirms which
             // stop was matched.
@@ -184,7 +227,10 @@ impl Component for Departures {
     }
 
     fn render_key(&self) -> DiffKey {
-        crate::components::place::section_key("departures", self.place_id)
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        ("departure-board", self.place_id, self.when).hash(&mut hasher);
+        DiffKey::U64(hasher.finish())
     }
 }
 

@@ -26,6 +26,7 @@ use super::{
         ACCENT, DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, divider,
         duration_text, icon, line_badge, rgb_or, show_on_map, status_line,
     },
+    when::{When, WhenPicker},
 };
 
 const START_COLOR: Color = Color::from_rgb(24, 128, 56);
@@ -69,6 +70,8 @@ impl Component for Planner {
         let to = transit.to.read().clone();
         let active = *transit.active_field.read();
         let picking = *transit.picking.read();
+        let when_state = transit.when;
+        let when = *when_state.read();
 
         let hint = match (active, &from, &to) {
             (Field::From, None, _) | (Field::To, _, None) if !picking => {
@@ -162,8 +165,17 @@ impl Component for Planner {
                     .margin((8.0f32, 0.0f32, 0.0f32, 4.0f32))
                     .into_element()
             }))
+            .child(
+                rect()
+                    .margin((10.0f32, 0.0f32, 0.0f32, 4.0f32))
+                    .child(WhenPicker {
+                        when: when_state,
+                        allow_arrive: true,
+                        icon: true,
+                    }),
+            )
             .maybe_child(match (from, to) {
-                (Some(from), Some(to)) => Some(Itineraries { from, to }.into_element()),
+                (Some(from), Some(to)) => Some(Itineraries { from, to, when }.into_element()),
                 _ => None,
             })
     }
@@ -380,6 +392,7 @@ enum PlanLoad {
 struct Itineraries {
     from: Endpoint,
     to: Endpoint,
+    when: When,
 }
 
 impl Component for Itineraries {
@@ -389,7 +402,7 @@ impl Component for Itineraries {
         let selected = use_state(|| 0usize);
 
         use_hook({
-            let (from, to) = (self.from.clone(), self.to.clone());
+            let (from, to, when) = (self.from.clone(), self.to.clone(), self.when);
             let mut state = state;
             let mut map = transit.map.clone();
             move || {
@@ -399,6 +412,7 @@ impl Component for Itineraries {
                         (to.lat, to.lon),
                         from.name.clone(),
                         to.name.clone(),
+                        when,
                     )
                     .await
                     {
@@ -475,6 +489,7 @@ impl Component for Itineraries {
             "itineraries",
             endpoint_key(&Some(self.from.clone())),
             endpoint_key(&Some(self.to.clone())),
+            self.when,
         ))
     }
 }

@@ -10,6 +10,7 @@ use map_component::{MapController, TappedLine};
 use super::{
     api::Departure,
     osm_lines::{TrackInfo, routes_from_tile},
+    when::When,
 };
 
 /// One end of a planned journey.
@@ -77,6 +78,8 @@ pub struct TransitController {
     /// Map taps only choose endpoints in this mode, so browsing the map while reading results
     /// doesn't overwrite them.
     pub picking: State<bool>,
+    /// When the planned journey leaves or arrives.
+    pub when: State<When>,
     /// The map, to draw and frame trips/journeys on it.
     pub map: MapController,
 }
@@ -91,6 +94,7 @@ impl TransitController {
             to: use_state(|| None),
             active_field: use_state(|| Field::From),
             picking: use_state(|| false),
+            when: use_state(When::default),
             map,
         }
     }

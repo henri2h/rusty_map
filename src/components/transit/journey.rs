@@ -6,7 +6,10 @@ use serde::Deserialize;
 
 use map_component::util::tiles::{FetchError, background_runtime};
 
-use super::api::{Mode, get_json, is_mission_code, parse_hex_color, parse_utc};
+use super::{
+    api::{Mode, get_json, is_mission_code, parse_hex_color, parse_utc},
+    when::When,
+};
 
 /// A stop (or the journey's start/end) along a leg.
 #[derive(Clone, PartialEq)]
@@ -100,24 +103,23 @@ pub async fn fetch_trip(trip_id: String) -> Result<Leg, FetchError> {
     .await
 }
 
-/// Public-transport itineraries from `from` to `to` (`(lat, lon)`), leaving now. The journey's
-/// own ends are labeled `from_name`/`to_name`.
+/// Public-transport itineraries from `from` to `to` (`(lat, lon)`), leaving or arriving as
+/// `when` says. The journey's own ends are labeled `from_name`/`to_name`.
 pub async fn plan(
     from: (f64, f64),
     to: (f64, f64),
     from_name: String,
     to_name: String,
+    when: When,
 ) -> Result<Vec<Itinerary>, FetchError> {
     on_background(async move {
-        let response: PlanJson = get_json(
-            "/v6/plan",
-            &[
-                ("fromPlace", format!("{},{}", from.0, from.1)),
-                ("toPlace", format!("{},{}", to.0, to.1)),
-                ("detailedLegs", "true".into()),
-            ],
-        )
-        .await?;
+        let mut query = vec![
+            ("fromPlace", format!("{},{}", from.0, from.1)),
+            ("toPlace", format!("{},{}", to.0, to.1)),
+            ("detailedLegs", "true".into()),
+        ];
+        query.extend(when.query());
+        let response: PlanJson = get_json("/v6/plan", &query).await?;
         let mut itineraries: Vec<Itinerary> = response
             .itineraries
             .into_iter()
