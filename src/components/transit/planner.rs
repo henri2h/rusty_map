@@ -9,7 +9,7 @@ use std::{
 
 use freya::{icons::lucide, prelude::*};
 
-use crate::mobile::{SheetScroll, TOUCH, text_size, use_screen};
+use crate::mobile::{Haptic, SheetScroll, TOUCH, haptic, tap_padding, text_size, use_screen};
 use map_component::{
     OverlayPath, OverlayStop, RouteOverlay,
     util::{tiles::background_delay, viewport::center_to_lonlat},
@@ -17,6 +17,7 @@ use map_component::{
 
 use crate::components::{
     favorites::Favorites,
+    navigation::ui::WalkRoute,
     place::humanize,
     search::favorite_chip,
     search::util::search::{self, SearchResult},
@@ -24,7 +25,7 @@ use crate::components::{
 
 use super::{
     api::{self, Mode},
-    controller::{Endpoint, Field, TransitController},
+    controller::{Endpoint, Field, TransitController, TravelMode},
     journey::{self, Itinerary, Leg},
     ui::{
         ACCENT, DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, divider,
@@ -79,6 +80,8 @@ impl Component for Planner {
         let shortcuts = favorite_shortcuts(&transit);
         let when_state = transit.when;
         let when = *when_state.read();
+        let mode_state = transit.mode;
+        let mode = *mode_state.read();
 
         let hint = match (active, &from, &to) {
             (Field::From, None, _) | (Field::To, _, None) if !picking => {
@@ -113,22 +116,6 @@ impl Component for Planner {
                             .font_size(text_size(17.0))
                             .font_weight(FontWeight::BOLD)
                             .color(TEXT),
-                    )
-                    .child(
-                        rect()
-                            .horizontal()
-                            .cross_align(Alignment::Center)
-                            .spacing(4.0)
-                            .padding((3.0f32, 8.0f32))
-                            .corner_radius(10.0f32)
-                            .background(Color::from_rgb(232, 240, 254))
-                            .child(icon(lucide::train_front(), ACCENT, 13.0))
-                            .child(
-                                label()
-                                    .text("Public transport")
-                                    .font_size(text_size(11.0))
-                                    .color(ACCENT),
-                            ),
                     ),
             )
             .child(
@@ -173,20 +160,82 @@ impl Component for Planner {
                     .margin((8.0f32, 0.0f32, 0.0f32, 4.0f32))
                     .into_element()
             }))
-            .child(
+            .child(mode_tabs(mode_state, mode))
+            // A walk leaves now: no departure time to pick.
+            .maybe_child((mode == TravelMode::Transit).then(|| {
                 rect()
                     .margin((10.0f32, 0.0f32, 0.0f32, 4.0f32))
                     .child(WhenPicker {
                         when: when_state,
                         allow_arrive: true,
                         icon: true,
-                    }),
-            )
-            .maybe_child(match (from, to) {
-                (Some(from), Some(to)) => Some(Itineraries { from, to, when }.into_element()),
+                    })
+                    .into_element()
+            }))
+            .maybe_child(match (from, to, mode) {
+                (Some(from), Some(to), TravelMode::Transit) => {
+                    Some(Itineraries { from, to, when }.into_element())
+                }
+                (Some(from), Some(to), TravelMode::Walk) => Some(
+                    rect()
+                        .vertical()
+                        .width(Size::fill())
+                        .height(Size::fill())
+                        // Clear of the Transit / Walk tabs: no departure-time row between them
+                        // here, as there is for transit.
+                        .padding((16.0f32, 0.0f32, 0.0f32, 0.0f32))
+                        .child(WalkRoute { from, to })
+                        .into_element(),
+                ),
                 _ => None,
             })
     }
+}
+
+/// Transit / Walk, side by side: how the journey is planned.
+fn mode_tabs(mut state: State<TravelMode>, current: TravelMode) -> Element {
+    let tab = |mode: TravelMode, svg: bytes::Bytes, text: &'static str| {
+        let selected = mode == current;
+        let (background, foreground) = if selected {
+            (ACCENT, Color::WHITE)
+        } else {
+            (Color::from_rgb(244, 246, 248), TEXT_MUTED)
+        };
+        rect()
+            .width(Size::flex(1.0))
+            .horizontal()
+            .main_align(Alignment::Center)
+            .cross_align(Alignment::Center)
+            .spacing(6.0)
+            .padding((tap_padding(6.0), 8.0))
+            .corner_radius(18.0f32)
+            .background(background)
+            .cursor(CursorIcon::Pointer)
+            .on_press(move |_: Event<PressEventData>| {
+                if !selected {
+                    haptic(Haptic::Toggle);
+                    state.set(mode);
+                }
+            })
+            .child(icon(svg, foreground, 15.0))
+            .child(
+                label()
+                    .text(text)
+                    .font_size(text_size(13.0))
+                    .font_weight(FontWeight::BOLD)
+                    .color(foreground),
+            )
+            .into_element()
+    };
+    rect()
+        .horizontal()
+        .content(Content::flex())
+        .width(Size::fill())
+        .spacing(8.0)
+        .margin((10.0f32, 0.0f32, 0.0f32, 0.0f32))
+        .child(tab(TravelMode::Transit, lucide::train_front(), "Transit"))
+        .child(tab(TravelMode::Walk, lucide::footprints(), "Walk"))
+        .into_element()
 }
 
 /// Saved places as chips: one tap fills the active field (start or destination).

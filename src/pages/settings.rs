@@ -50,7 +50,7 @@ const SOURCES: &[Source] = &[
     },
     Source {
         name: "Transitous",
-        provides: "Departures, trips and journey planning",
+        provides: "Departures, trips, journey planning; walks outside France",
         licence: Some("per feed, see its sources"),
         url: transit::SOURCES_URL,
     },
@@ -71,6 +71,12 @@ const SOURCES: &[Source] = &[
         provides: "Place facts",
         licence: Some("CC0 1.0"),
         url: "https://www.wikidata.org/wiki/Wikidata:Licensing",
+    },
+    Source {
+        name: "IGN Géoplateforme",
+        provides: "Walking routes and elevation profiles",
+        licence: Some("Licence Ouverte 2.0"),
+        url: crate::components::navigation::elevation::SOURCE_URL,
     },
     Source {
         name: "Lucide",

@@ -76,7 +76,7 @@ impl Itinerary {
 }
 
 /// Runs `future` on the background runtime (reqwest needs Tokio; freya's executor isn't).
-async fn on_background<T: Send + 'static>(
+pub(crate) async fn on_background<T: Send + 'static>(
     future: impl Future<Output = Result<T, FetchError>> + Send + 'static,
 ) -> Result<T, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();

@@ -53,6 +53,65 @@ pub fn set_tracking(enabled: bool) {
     }
 }
 
+/// Desktop has no location source: with `RUSTY_MAP_SIMULATE_WALK` set, starting walking
+/// navigation walks fake fixes along its route instead (see [`simulate_walk`]).
+pub fn simulating() -> bool {
+    !AVAILABLE && std::env::var_os("RUSTY_MAP_SIMULATE_WALK").is_some()
+}
+
+/// Bumped to stop a running simulation.
+static SIMULATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Walks fake fixes along `points` (`(lon, lat)`) at 1.4 m/s, one a second, a few metres off
+/// the line, with one 60 m detour from 40% to 50% of the way (enough to go off the route and
+/// re-route). Replaces any simulation already running. Only when [`simulating`].
+pub fn simulate_walk(points: Vec<(f64, f64)>) {
+    use crate::components::navigation::geo::{bearing, cumulative, point_at};
+    use std::sync::atomic::Ordering;
+
+    if !simulating() || points.len() < 2 {
+        return;
+    }
+    let generation = SIMULATION.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let along = cumulative(&points);
+        let length = *along.last().unwrap_or(&0.0);
+        let metres_per_degree = 111_320.0;
+        let mut walked = 0.0;
+        let mut second = 0u32;
+        while SIMULATION.load(Ordering::SeqCst) == generation && walked <= length + 10.0 {
+            let (lon, lat) = point_at(&points, &along, walked);
+            let heading = bearing(
+                point_at(&points, &along, walked),
+                point_at(&points, &along, walked + 5.0),
+            )
+            .to_radians();
+            // Sideways from the route: GPS-like wobble, plus the detour.
+            let detour = if (0.4..0.5).contains(&(walked / length)) {
+                60.0
+            } else {
+                0.0
+            };
+            let side = 3.0 * (second as f64 * 1.7).sin() + detour;
+            let (east, north) = (side * heading.cos(), -side * heading.sin());
+            READING.send_replace(Reading::Fix(Fix {
+                lat: lat + north / metres_per_degree,
+                lon: lon + east / (metres_per_degree * lat.to_radians().cos()),
+                accuracy_m: Some(6.0),
+                bearing: Some(heading.to_degrees() as f32),
+            }));
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            walked += 1.4;
+            second += 1;
+        }
+    });
+}
+
+/// Stops [`simulate_walk`].
+pub fn stop_simulation() {
+    SIMULATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(target_os = "android")]
 mod android {
     use jni::{

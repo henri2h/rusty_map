@@ -18,6 +18,10 @@ use crate::components::{
     favorites::Favorites,
     layers::{LayersButton, LayersModal, MapLayer},
     map_view::use_remembered_view,
+    navigation::{
+        NavigationController,
+        ui::{NavigationBanner, NavigationBar, RecenterChip},
+    },
     place::PlaceController,
     search::{SearchController, SearchPanel},
     transit::{Endpoint, Field, TransitController},
@@ -32,6 +36,17 @@ impl Component for HomePage {
         let places = PlaceController::new();
         let search = SearchController::new();
         let transit = TransitController::new(controller.clone());
+        let navigation = NavigationController::new(controller.clone());
+        use_provide_context({
+            let navigation = navigation.clone();
+            move || navigation
+        });
+        // Only start and end re-render the page, not every fix while guided.
+        let navigating = use_memo({
+            let navigation = navigation.clone();
+            move || navigation.is_active()
+        });
+        let navigating = *navigating.read();
         let favorites = Favorites::new();
         use_provide_context(move || favorites);
         let chargers = Chargers::new();
@@ -192,7 +207,8 @@ impl Component for HomePage {
                 open: layers_open,
                 top: 12.,
             })
-            .maybe_child(location::AVAILABLE.then(|| {
+            // While guiding, the walk follows the location itself (and offers to re-centre).
+            .maybe_child((location::AVAILABLE && !navigating).then(|| {
                 LocationButton {
                     map: controller.clone(),
                 }
@@ -215,12 +231,14 @@ impl Component for HomePage {
             .child(PickBanner {
                 transit: transit.clone(),
             })
-            .child(SearchPanel::new(
-                controller.clone(),
-                places.clone(),
-                search.clone(),
-                transit,
-            ))
+            // Hidden while guiding: the banner and bottom bar take its place.
+            .maybe_child((!navigating).then(|| {
+                SearchPanel::new(controller.clone(), places.clone(), search.clone(), transit)
+                    .into_element()
+            }))
+            .child(NavigationBanner {})
+            .child(NavigationBar {})
+            .child(RecenterChip {})
             .child(FavoritesPage {
                 map: controller,
                 places,

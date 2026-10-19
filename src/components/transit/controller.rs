@@ -78,6 +78,14 @@ fn next_view_id() -> u64 {
     NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// How the Directions sheet gets there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TravelMode {
+    #[default]
+    Transit,
+    Walk,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct TransitController {
     pub view: State<Option<TransitView>>,
@@ -92,6 +100,7 @@ pub struct TransitController {
     pub picking: State<bool>,
     /// When the planned journey leaves or arrives.
     pub when: State<When>,
+    pub mode: State<TravelMode>,
     /// The map, to draw and frame trips/journeys on it.
     pub map: MapController,
 }
@@ -107,6 +116,7 @@ impl TransitController {
             active_field: use_state(|| Field::From),
             picking: use_state(|| false),
             when: use_state(When::default),
+            mode: use_state(TravelMode::default),
             map,
         }
     }

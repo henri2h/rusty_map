@@ -241,6 +241,16 @@ pub fn share(subject: &str, text: &str) -> bool {
     }
 }
 
+/// Keeps the screen on (Android), e.g. while guiding a walk. No-op on desktop.
+pub fn keep_screen_on(on: bool) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = call_activity("setKeepScreenOn", "(Z)V", &[Arg::Bool(on)]) {
+        log::warn!("keep_screen_on({on}) failed: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
 /// Kinds of haptic feedback, mapped to Android's `HapticFeedbackConstants` in `MainActivity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Haptic {

@@ -11,6 +11,7 @@ import android.location.LocationManager
 import android.location.LocationRequest
 import android.os.Bundle
 import android.view.HapticFeedbackConstants
+import android.view.WindowManager
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
@@ -101,6 +102,18 @@ class MainActivity : NativeActivity() {
     override fun onPause() {
         super.onPause()
         stopLocation()
+    }
+
+    /** Called from Rust (`mobile::keep_screen_on`) on any thread, e.g. while guiding a walk. */
+    @Suppress("unused")
+    fun setKeepScreenOn(on: Boolean) {
+        runOnUiThread {
+            if (on) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
     }
 
     /** Called from Rust (`mobile::share`) on any thread: the system share sheet for `text`. */

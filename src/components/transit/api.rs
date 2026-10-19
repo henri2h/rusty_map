@@ -110,7 +110,7 @@ pub async fn departures_near(
     rx.await.unwrap_or(Err(FetchError::TaskFailed))
 }
 
-pub(super) async fn get_json<T: for<'de> Deserialize<'de>>(
+pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(
     path: &str,
     query: &[(&str, String)],
 ) -> Result<T, FetchError> {
