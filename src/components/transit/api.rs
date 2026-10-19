@@ -26,7 +26,7 @@ pub const SOURCES_URL: &str = "https://transitous.org/sources/";
 const MAX_STOP_DISTANCE_M: f64 = 300.0;
 
 /// How many departures to ask for.
-const DEPARTURE_COUNT: u32 = 12;
+pub const DEPARTURE_COUNT: u32 = 12;
 
 #[derive(Clone, PartialEq)]
 pub struct Stop {
@@ -53,7 +53,7 @@ pub struct Departure {
     pub trip_id: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, Deserialize)]
 pub enum Mode {
     Walk,
     Bus,
@@ -93,6 +93,7 @@ pub async fn departures_near(
     lon: f64,
     name: String,
     when: When,
+    count: u32,
 ) -> Result<Option<StopDepartures>, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     background_runtime().spawn(async move {
@@ -100,7 +101,7 @@ pub async fn departures_near(
             let Some(stop) = find_stop(lat, lon, &name).await? else {
                 return Ok(None);
             };
-            let departures = fetch_departures(&stop.id, when).await?;
+            let departures = fetch_departures(&stop.id, when, count).await?;
             Ok(Some(StopDepartures { stop, departures }))
         }
         .await;
@@ -251,11 +252,12 @@ struct StopTimePlace {
 }
 
 /// The next departures from `stop_id`, from now or from `when`'s time.
-async fn fetch_departures(stop_id: &str, when: When) -> Result<Vec<Departure>, FetchError> {
-    let mut query = vec![
-        ("stopId", stop_id.to_string()),
-        ("n", DEPARTURE_COUNT.to_string()),
-    ];
+async fn fetch_departures(
+    stop_id: &str,
+    when: When,
+    count: u32,
+) -> Result<Vec<Departure>, FetchError> {
+    let mut query = vec![("stopId", stop_id.to_string()), ("n", count.to_string())];
     // A board lists departures, so only the time is used, never `arriveBy`.
     query.extend(when.query().into_iter().filter(|(key, _)| *key == "time"));
     let response: StopTimesResponse = get_json("/v6/stoptimes", &query).await?;
@@ -310,6 +312,14 @@ fn to_departure(stop_time: StopTime) -> Option<Departure> {
     })
 }
 
+/// Whether a departure's line name (`"RER B"`, `"14"`) is the line OSM calls `wanted` (`"B"`,
+/// `"14"`): the same ignoring case, or the same last word.
+pub fn same_line(departure_line: &str, wanted: &str) -> bool {
+    let last = |text: &str| text.split_whitespace().last().unwrap_or("").to_lowercase();
+    departure_line.trim().eq_ignore_ascii_case(wanted.trim())
+        || (!wanted.trim().is_empty() && last(departure_line) == last(wanted))
+}
+
 pub(super) fn is_mission_code(headsign: &str) -> bool {
     (2..=5).contains(&headsign.len()) && headsign.chars().all(|c| c.is_ascii_uppercase())
 }
@@ -353,6 +363,15 @@ mod tests {
         assert_eq!(parse_utc("2026-10-11T22:01:00Z"), Some(1_791_756_060));
         assert_eq!(parse_utc("2026-10-11T22:01:00.500Z"), Some(1_791_756_060));
         assert_eq!(parse_utc("2026-10-11T22:01:00+02:00"), None);
+    }
+
+    #[test]
+    fn matches_line_names() {
+        assert!(same_line("RER B", "B"));
+        assert!(same_line("14", "14"));
+        assert!(same_line("t3a", "T3a"));
+        assert!(!same_line("11", "1"));
+        assert!(!same_line("RER A", "B"));
     }
 
     #[test]

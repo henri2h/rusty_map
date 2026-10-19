@@ -447,8 +447,15 @@ pub async fn route_shape(relation_id: u64) -> Result<RouteShape, FetchError> {
             stops: Vec::new(),
         };
         for member in members {
-            let full = elements(get(format!("{OSM_API}/relation/{member}/full.json")).await?);
-            let part = shape_of(&full, member)?;
+            // One missing variant (deleted or redacted since the tiles were built) shouldn't
+            // hide the others.
+            let part = match get(format!("{OSM_API}/relation/{member}/full.json")).await {
+                Ok(json) => shape_of(&elements(json), member)?,
+                Err(err) => {
+                    log::warn!("[transit] route {member} of {relation_id} skipped: {err:?}");
+                    continue;
+                }
+            };
             shape.ways.extend(part.ways);
             for stop in part.stops {
                 if !shape.stops.iter().any(|(known, _, _)| *known == stop.0) {

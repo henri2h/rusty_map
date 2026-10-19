@@ -5,13 +5,17 @@
 use freya::{icons::lucide, prelude::*};
 use map_component::{OverlayPath, OverlayStop, RouteOverlay};
 
-use crate::components::place::{humanize, section_key};
+use crate::components::{
+    favorites::{Favorites, StopLine},
+    place::{humanize, section_key},
+};
 
 use super::{
     api::Departure,
     controller::TransitController,
+    departures::Departures,
     journey::{self, Leg},
-    osm_lines::{self, RouteInfo, TrackInfo},
+    osm_lines::{self, RouteInfo, RouteShape, TrackInfo},
     ui::{
         ACCENT, LATE, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, divider, icon, line_badge,
         rgb_or, section_title, show_on_map, status_line,
@@ -58,8 +62,6 @@ impl Component for TrackView {
             let from_tile = self.from_tile.clone();
             move || from_tile.map_or(Load::Loading, Load::Ready)
         });
-        // The line drawn in full on the map, when the user picked one.
-        let shown_route = use_state::<Option<u64>>(|| None);
 
         use_hook({
             let (way_id, lat, lon, radius_m) = (self.way_id, self.lat, self.lon, self.radius_m);
@@ -113,11 +115,11 @@ impl Component for TrackView {
                         if index > 0 {
                             body.push(divider());
                         }
-                        body.push(route_row(route, *shown_route.read(), &transit, shown_route));
+                        body.push(route_row(route, self.way_id, &transit));
                     }
                     body.push(
                         label()
-                            .text("Tap a line to show its whole route. Data © OpenStreetMap contributors")
+                            .text("Tap a line for its whole route and stops. Data © OpenStreetMap contributors")
                             .font_size(11.0)
                             .color(TEXT_FAINT)
                             .margin((10.0f32, 0.0f32))
@@ -178,12 +180,7 @@ fn track_header(info: &TrackInfo, kind_title: &str) -> Element {
         .into_element()
 }
 
-fn route_row(
-    route: &RouteInfo,
-    shown: Option<u64>,
-    transit: &TransitController,
-    mut shown_route: State<Option<u64>>,
-) -> Element {
+fn route_row(route: &RouteInfo, way_id: Option<u64>, transit: &TransitController) -> Element {
     let details = [route.network.clone(), route.operator.clone()]
         .into_iter()
         .flatten()
@@ -193,10 +190,8 @@ fn route_row(
         (Some(from), Some(to)) => Some(format!("{from} ↔ {to}")),
         _ => None,
     };
-    let selected = shown == Some(route.relation_id);
-    let relation_id = route.relation_id;
-    let color = rgb_or(route.color, ACCENT);
-    let map = transit.map.clone();
+    let mut transit = transit.clone();
+    let opened = route.clone();
 
     rect()
         .horizontal()
@@ -205,34 +200,8 @@ fn route_row(
         .spacing(10.0)
         .padding((8.0f32, 4.0f32))
         .corner_radius(8.0f32)
-        .maybe(selected, |r| r.background(Color::from_rgb(241, 244, 250)))
         .cursor(CursorIcon::Pointer)
-        .on_press(move |_: Event<PressEventData>| {
-            shown_route.set(Some(relation_id));
-            let mut map = map.clone();
-            spawn(async move {
-                match osm_lines::route_shape(relation_id).await {
-                    Ok(shape) => show_on_map(
-                        &mut map,
-                        RouteOverlay {
-                            paths: shape
-                                .ways
-                                .iter()
-                                .map(|way| OverlayPath::from_lonlat(way, color, 5.0, false))
-                                .collect(),
-                            stops: shape
-                                .stops
-                                .iter()
-                                .map(|(_, lon, lat)| {
-                                    OverlayStop::from_lonlat(*lon, *lat, color, false)
-                                })
-                                .collect(),
-                        },
-                    ),
-                    Err(err) => log::warn!("[transit] route shape failed: {err:?}"),
-                }
-            });
-        })
+        .on_press(move |_: Event<PressEventData>| transit.show_line(opened.clone(), way_id))
         .child(line_badge(route.mode, &route.line, route.color, None))
         .child(
             rect()
@@ -265,6 +234,242 @@ fn route_row(
         .into_element()
 }
 
+// ─── Line ─────────────────────────────────────────────────────────────────────
+
+/// One line: drawn in full on the map, with its stops; a stop opens that line's next
+/// departures there.
+#[derive(PartialEq)]
+pub struct LineView {
+    pub id: u64,
+    pub route: RouteInfo,
+    pub way_id: Option<u64>,
+}
+
+impl Component for LineView {
+    fn render(&self) -> impl IntoElement {
+        let transit = use_consume::<TransitController>();
+        let state = use_state(|| Load::<RouteShape>::Loading);
+        let mut open_stop = use_state::<Option<usize>>(|| None);
+        // `route`, with its relation id once known (see `resolve_relation`).
+        let resolved = use_state(|| self.route.clone());
+
+        use_hook({
+            let way_id = self.way_id;
+            let color = rgb_or(self.route.color, ACCENT);
+            let mut state = state;
+            let mut resolved = resolved;
+            let mut map = transit.map.clone();
+            move || {
+                spawn(async move {
+                    let route = resolved.peek().clone();
+                    let Some(relation_id) = resolve_relation(&route, way_id).await else {
+                        state.set(Load::Failed);
+                        return;
+                    };
+                    if relation_id != route.relation_id {
+                        resolved.set(RouteInfo {
+                            relation_id,
+                            ..route
+                        });
+                    }
+                    match osm_lines::route_shape(relation_id).await {
+                        Ok(shape) => {
+                            show_on_map(&mut map, route_overlay(&shape, color));
+                            state.set(Load::Ready(shape));
+                        }
+                        Err(err) => {
+                            log::warn!("[transit] route {relation_id} shape failed: {err:?}");
+                            state.set(Load::Failed);
+                        }
+                    }
+                    map.platform.send(UserEvent::RequestRedraw);
+                });
+            }
+        });
+
+        let route = &*resolved.read();
+        let details = [route.network.clone(), route.operator.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+
+        let mut body: Vec<Element> = vec![
+            rect()
+                .horizontal()
+                .content(Content::flex())
+                .width(Size::fill())
+                .cross_align(Alignment::Center)
+                .spacing(10.0)
+                .child(line_badge(route.mode, &route.line, route.color, None))
+                .child(
+                    rect()
+                        .vertical()
+                        .width(Size::flex(1.0))
+                        .child(
+                            label()
+                                .text(route.name.clone())
+                                .font_size(16.0)
+                                .font_weight(FontWeight::BOLD)
+                                .color(TEXT)
+                                .width(Size::fill()),
+                        )
+                        .maybe_child((!details.is_empty()).then(|| {
+                            label()
+                                .text(details)
+                                .font_size(12.0)
+                                .color(TEXT_MUTED)
+                                .into_element()
+                        })),
+                )
+                .into_element(),
+        ];
+
+        match &*state.read() {
+            Load::Loading => body.push(loading_line("Loading the line…")),
+            Load::Failed => body.push(failed_line("Couldn't load this line's route")),
+            Load::Ready(shape) => {
+                let stops = unique_stops(shape);
+                if stops.is_empty() {
+                    body.push(failed_line("No stops mapped for this line"));
+                } else {
+                    body.push(section_title(lucide::map_pin(), "Stops"));
+                    body.push(
+                        label()
+                            .text("Tap a stop for this line's next departures there.")
+                            .font_size(11.0)
+                            .color(TEXT_FAINT)
+                            .margin((0.0f32, 0.0f32, 6.0f32, 0.0f32))
+                            .into_element(),
+                    );
+                }
+                let open = *open_stop.read();
+                for (index, (name, lon, lat)) in stops.into_iter().enumerate() {
+                    let is_open = open == Some(index);
+                    body.push(
+                        rect()
+                            .horizontal()
+                            .content(Content::flex())
+                            .width(Size::fill())
+                            .cross_align(Alignment::Center)
+                            .spacing(10.0)
+                            .padding((7.0f32, 4.0f32))
+                            .corner_radius(8.0f32)
+                            .maybe(is_open, |r| r.background(Color::from_rgb(241, 244, 250)))
+                            .cursor(CursorIcon::Pointer)
+                            .on_press(move |_: Event<PressEventData>| {
+                                open_stop.set(if is_open { None } else { Some(index) })
+                            })
+                            .child(
+                                rect()
+                                    .width(Size::px(10.0))
+                                    .height(Size::px(10.0))
+                                    .corner_radius(5.0f32)
+                                    .background(rgb_or(route.color, ACCENT)),
+                            )
+                            .child(
+                                label()
+                                    .text(name.clone())
+                                    .width(Size::flex(1.0))
+                                    .font_size(13.0)
+                                    .color(TEXT),
+                            )
+                            .child(icon(
+                                if is_open {
+                                    lucide::chevron_up()
+                                } else {
+                                    lucide::chevron_down()
+                                },
+                                TEXT_FAINT,
+                                14.0,
+                            ))
+                            .into_element(),
+                    );
+                    if is_open {
+                        body.push(
+                            rect()
+                                .width(Size::fill())
+                                .margin((4.0f32, 0.0f32, 4.0f32, 0.0f32))
+                                .child(Departures {
+                                    place_id: line_stop_key(route.relation_id, index),
+                                    lat,
+                                    lon,
+                                    name,
+                                    line: Some(route.line.clone()),
+                                })
+                                .into_element(),
+                        );
+                    }
+                }
+            }
+        }
+
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .spacing(4.0)
+            .children(body)
+    }
+
+    fn render_key(&self) -> DiffKey {
+        section_key("line", self.id)
+    }
+}
+
+const STAR: Color = Color::from_rgb(242, 153, 0);
+
+/// The OSM relation behind `route`: its own id, or — tiles built before routes without a
+/// `route_master` kept theirs — the same-named route among the tapped track's relations.
+async fn resolve_relation(route: &RouteInfo, way_id: Option<u64>) -> Option<u64> {
+    if route.relation_id != 0 {
+        return Some(route.relation_id);
+    }
+    let info = osm_lines::track_info(way_id?).await.ok()?;
+    let found = info.routes.iter().find(|candidate| {
+        candidate.line.eq_ignore_ascii_case(&route.line) || candidate.name.starts_with(&route.name)
+    });
+    if found.is_none() {
+        log::warn!("[transit] no relation found for line {:?}", route.line);
+    }
+    found.map(|candidate| candidate.relation_id)
+}
+
+/// The whole line on the map: its track in the line colour, its stops as dots.
+fn route_overlay(shape: &RouteShape, color: Color) -> RouteOverlay {
+    RouteOverlay {
+        paths: shape
+            .ways
+            .iter()
+            .map(|way| OverlayPath::from_lonlat(way, color, 5.0, false))
+            .collect(),
+        stops: shape
+            .stops
+            .iter()
+            .map(|(_, lon, lat)| OverlayStop::from_lonlat(*lon, *lat, color, false))
+            .collect(),
+    }
+}
+
+/// The line's stops, once each: a stop appears for every direction and as both a stop
+/// position and a platform.
+fn unique_stops(shape: &RouteShape) -> Vec<(String, f64, f64)> {
+    let mut seen = std::collections::HashSet::new();
+    shape
+        .stops
+        .iter()
+        .filter(|(name, _, _)| seen.insert(name.to_lowercase()))
+        .cloned()
+        .collect()
+}
+
+/// Diff key for one stop's departures in a line view.
+fn line_stop_key(relation_id: u64, index: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    ("line-stop", relation_id, index).hash(&mut hasher);
+    hasher.finish()
+}
+
 // ─── Trip ──────────────────────────────────────────────────────────────────────
 
 /// Every stop of one vehicle's run, opened from a departure row.
@@ -273,11 +478,13 @@ pub struct TripView {
     pub id: u64,
     pub departure: Departure,
     pub from_stop: String,
+    pub stop_position: Option<(f64, f64)>,
 }
 
 impl Component for TripView {
     fn render(&self) -> impl IntoElement {
         let transit = use_consume::<TransitController>();
+        let favorites = use_try_consume::<Favorites>();
         let state = use_state(|| Load::<Leg>::Loading);
 
         use_hook({
@@ -325,6 +532,58 @@ impl Component for TripView {
                         .color(TEXT),
                 ),
         );
+        // Save this line, in this direction, at the stop it was opened from.
+        let save = favorites
+            .zip(self.stop_position)
+            .map(|(mut favorites, (lat, lon))| {
+                let stop_line = StopLine {
+                    stop: self.from_stop.clone(),
+                    lat,
+                    lon,
+                    line: departure.line.clone(),
+                    mode: departure.mode,
+                    color: departure.color,
+                    text_color: departure.text_color,
+                    headsign: departure.headsign.clone(),
+                };
+                let saved = favorites.has_stop_line(&stop_line);
+                Button::new()
+                    .flat()
+                    .compact()
+                    .on_press(move |_: Event<PressEventData>| {
+                        favorites.toggle_stop_line(stop_line.clone())
+                    })
+                    .child(
+                        rect()
+                            .horizontal()
+                            .cross_align(Alignment::Center)
+                            .spacing(6.0)
+                            .child(icon(
+                                if saved {
+                                    lucide::star_off()
+                                } else {
+                                    lucide::star()
+                                },
+                                STAR,
+                                16.0,
+                            ))
+                            .child(
+                                label()
+                                    .text(if saved {
+                                        format!("Saved: next departures from {}", self.from_stop)
+                                    } else {
+                                        format!(
+                                            "Save next departures from {} this way",
+                                            self.from_stop
+                                        )
+                                    })
+                                    .font_size(12.0)
+                                    .color(TEXT),
+                            ),
+                    )
+                    .into_element()
+            });
+        let header = header.maybe_child(save);
 
         let body: Vec<Element> = match &*state.read() {
             Load::Loading => vec![loading_line("Loading trip…")],

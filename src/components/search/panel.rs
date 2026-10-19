@@ -31,7 +31,10 @@ use map_component::{
 use crate::components::{
     favorites::{Favorite, Favorites},
     place::{PlaceController, SelectedPlace, humanize},
-    transit::{Departures, Endpoint, Planner, TrackView, TransitController, TransitView, TripView},
+    transit::{
+        Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
+        TripView,
+    },
 };
 
 use super::{
@@ -91,6 +94,9 @@ impl Component for SearchPanel {
     fn render(&self) -> impl IntoElement {
         let (map, places, search, transit) = (&self.map, &self.places, &self.search, &self.transit);
         let favorites = use_consume::<Favorites>();
+        // Favorites show only while the search box has focus — when the user starts a search.
+        let input_id = use_a11y();
+        let input_focus = use_focus(input_id);
 
         let on_validate = build_on_search_input(map, places, search);
         let has_query = !search.query.read().is_empty();
@@ -139,6 +145,7 @@ impl Component for SearchPanel {
             )
             .width(Size::fill())
             .leading(icon(lucide::search(), TEXT_FAINT))
+            .a11y_id(input_id)
             .on_validate(on_validate);
         if !has_query {
             let mut transit = transit.clone();
@@ -178,10 +185,19 @@ impl Component for SearchPanel {
             vec![Planner {}.into_element()]
         } else {
             let mut content = vec![input.into_element()];
-            let idle = !drawer_open && dropdown.is_none() && !has_query;
-            let saved = favorites.list.read().clone();
-            if idle && !saved.is_empty() {
-                content.push(favorite_chips(saved, map, places, search));
+            if !drawer_open && input_focus().is_focused() {
+                // Typing narrows them down to the matching names.
+                let query = search.query.read().trim().to_lowercase();
+                let saved: Vec<Favorite> = favorites
+                    .list
+                    .read()
+                    .iter()
+                    .filter(|favorite| favorite.name.to_lowercase().contains(&query))
+                    .cloned()
+                    .collect();
+                if !saved.is_empty() {
+                    content.push(favorite_chips(saved, map, places, search));
+                }
             }
             content.extend(dropdown);
             if let Some(view) = view {
@@ -214,10 +230,11 @@ impl Component for SearchPanel {
     }
 }
 
-/// A transit view (tapped track, or a trip) under a "Back" row returning to what was there.
+/// A transit view (tapped track, a line, or a trip) under a "Back" row returning to what was there.
 fn transit_view(view: TransitView, transit: TransitController) -> Element {
     let mut close = transit.clone();
     let content = match view {
+        TransitView::Line { id, route, way_id } => LineView { id, route, way_id }.into_element(),
         TransitView::Track {
             id,
             way_id,
@@ -240,10 +257,12 @@ fn transit_view(view: TransitView, transit: TransitController) -> Element {
             id,
             departure,
             from_stop,
+            stop_position,
         } => TripView {
             id,
             departure,
             from_stop,
+            stop_position,
         }
         .into_element(),
     };
@@ -438,7 +457,7 @@ fn favorite_chips(
     places: &PlaceController,
     search: &SearchController,
 ) -> Element {
-    let chips = favorites.into_iter().map(|favorite| {
+    let place_chips = favorites.into_iter().map(|favorite| {
         let map = map.clone();
         let mut places = places.clone();
         let mut search = search.clone();
@@ -459,7 +478,7 @@ fn favorite_chips(
                 .horizontal()
                 .spacing(6.0)
                 .padding((6.0f32, 4.0f32, 2.0f32, 4.0f32))
-                .children(chips),
+                .children(place_chips),
         )
         .into_element()
 }
@@ -717,6 +736,7 @@ fn place_details(
                 lat,
                 lon,
                 name: title,
+                line: None,
             }
             .into_element(),
         );

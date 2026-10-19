@@ -8,7 +8,9 @@ mod ui;
 mod views;
 mod when;
 
+pub use api::Mode;
 pub use controller::{Endpoint, Field, TransitController, TransitView};
-pub use departures::Departures;
+pub use departures::{Departures, NextTimes};
 pub use planner::Planner;
-pub use views::{TrackView, TripView};
+pub use ui::line_badge;
+pub use views::{LineView, TrackView, TripView};

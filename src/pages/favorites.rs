@@ -1,4 +1,5 @@
-//! The favorites page: every saved place, with live departures for the ones that are stops.
+//! The favorites page: every saved place, with live departures for the ones that are stops,
+//! and the lines saved at a stop in one direction, each with its next few times.
 //! Drawn over the map inside `HomePage` (not a separate route), so the map, the selected place
 //! and the transit views keep their state: tapping a departure opens its trip in the drawer
 //! (the page steps aside until the trip is closed), "Show on map" and "Directions" close it.
@@ -7,10 +8,10 @@ use freya::{icons::lucide, prelude::*};
 use map_component::MapController;
 
 use crate::components::{
-    favorites::{Favorite, Favorites},
+    favorites::{Favorite, Favorites, StopLine},
     place::PlaceController,
     search::{SearchController, fly_to},
-    transit::{Departures, Endpoint, TransitController},
+    transit::{Departures, Endpoint, NextTimes, TransitController, line_badge},
 };
 
 const TEXT: Color = Color::from_rgb(32, 33, 36);
@@ -41,26 +42,40 @@ impl Component for FavoritesPage {
             return rect().into_element();
         }
         let list = favorites.list.read().clone();
+        let stop_lines = favorites.stop_lines.read().clone();
         let (stops, others): (Vec<Favorite>, Vec<Favorite>) =
             list.into_iter().partition(|favorite| favorite.stop);
 
         let mut column: Vec<Element> = Vec::new();
-        if stops.is_empty() && others.is_empty() {
+        if stops.is_empty() && others.is_empty() && stop_lines.is_empty() {
             column.push(
                 label()
-                    .text("No favorites yet. Open a place on the map and press Save.")
+                    .text(
+                        "No favorites yet. Open a place on the map and press Save, or open a \
+                         departure and save its line from that stop.",
+                    )
                     .font_size(14.0)
                     .color(TEXT_MUTED)
                     .margin((24.0f32, 0.0f32))
                     .into_element(),
             );
         }
-        if !stops.is_empty() {
+        if !stops.is_empty() || !stop_lines.is_empty() {
             column.push(section_title(lucide::clock(), "Live departures"));
+            for stop_line in stop_lines {
+                column.push(
+                    rect()
+                        .key(stop_line.key())
+                        .width(Size::fill())
+                        .child(stop_line_card(stop_line, favorites))
+                        .into_element(),
+                );
+            }
             for favorite in stops {
                 column.push(self.card(favorite, &transit, favorites));
             }
         }
+
         if !others.is_empty() {
             column.push(section_title(lucide::star(), "Places"));
             for favorite in others {
@@ -247,11 +262,79 @@ impl FavoritesPage {
                         lat: favorite.lat,
                         lon: favorite.lon,
                         name: favorite.name.clone(),
+                        line: None,
                     })
                     .into_element()
             }))
             .into_element()
     }
+}
+
+/// A saved line and direction at a stop: badge, direction, stop, and its next times.
+fn stop_line_card(stop_line: StopLine, mut favorites: Favorites) -> Element {
+    let remove = stop_line.clone();
+    rect()
+        .vertical()
+        .width(Size::fill())
+        .spacing(10.0)
+        .padding(14.0f32)
+        .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32))
+        .corner_radius(12.0f32)
+        .background(Color::WHITE)
+        .shadow((
+            0.0f32,
+            1.0f32,
+            3.0f32,
+            0.0f32,
+            Color::from_argb(30, 0, 0, 0),
+        ))
+        .child(
+            rect()
+                .horizontal()
+                .content(Content::flex())
+                .width(Size::fill())
+                .cross_align(Alignment::Center)
+                .spacing(10.0)
+                .child(line_badge(
+                    stop_line.mode,
+                    &stop_line.line,
+                    stop_line.color,
+                    stop_line.text_color,
+                ))
+                .child(
+                    rect()
+                        .vertical()
+                        .width(Size::flex(1.0))
+                        .child(
+                            label()
+                                .text(format!("→ {}", stop_line.headsign))
+                                .font_size(14.0)
+                                .font_weight(FontWeight::BOLD)
+                                .color(TEXT)
+                                .max_lines(1)
+                                .text_overflow(TextOverflow::Ellipsis),
+                        )
+                        .child(
+                            label()
+                                .text(format!("from {}", stop_line.stop))
+                                .font_size(12.0)
+                                .color(TEXT_FAINT),
+                        ),
+                )
+                .child(
+                    Button::new()
+                        .flat()
+                        .compact()
+                        .on_press(move |_: Event<PressEventData>| {
+                            favorites.toggle_stop_line(remove.clone())
+                        })
+                        .child(icon(lucide::trash_2(), TEXT_FAINT, 16.0)),
+                ),
+        )
+        .child(NextTimes {
+            stop_line: stop_line.clone(),
+        })
+        .into_element()
 }
 
 fn action(svg: Bytes, text: &'static str, mut on_press: impl FnMut() + 'static) -> Element {

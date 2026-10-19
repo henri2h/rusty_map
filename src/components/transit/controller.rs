@@ -9,7 +9,7 @@ use map_component::{MapController, TappedLine};
 
 use super::{
     api::Departure,
-    osm_lines::{TrackInfo, routes_from_tile},
+    osm_lines::{RouteInfo, TrackInfo, routes_from_tile},
     when::When,
 };
 
@@ -44,18 +44,30 @@ pub enum TransitView {
         /// no lookup needed. `None` with other tile sources.
         from_tile: Option<TrackInfo>,
     },
+    /// One line: its whole route on the map, its stops with that line's next departures.
+    Line {
+        id: u64,
+        route: RouteInfo,
+        /// The tapped track it was opened from: finds the line's relation when the tile didn't
+        /// carry its id.
+        way_id: Option<u64>,
+    },
     /// One vehicle's run, opened from a departure row at stop `from_stop`.
     Trip {
         id: u64,
         departure: Departure,
         from_stop: String,
+        /// Where `from_stop` is, to save this line and direction there as a favorite.
+        stop_position: Option<(f64, f64)>,
     },
 }
 
 impl TransitView {
     pub fn id(&self) -> u64 {
         match self {
-            TransitView::Track { id, .. } | TransitView::Trip { id, .. } => *id,
+            TransitView::Track { id, .. }
+            | TransitView::Trip { id, .. }
+            | TransitView::Line { id, .. } => *id,
         }
     }
 }
@@ -128,12 +140,27 @@ impl TransitController {
         }));
     }
 
-    pub fn show_trip(&mut self, departure: Departure, from_stop: String) {
+    pub fn show_line(&mut self, route: RouteInfo, way_id: Option<u64>) {
+        self.map.set_route_overlay(None);
+        self.view.set(Some(TransitView::Line {
+            id: next_view_id(),
+            route,
+            way_id,
+        }));
+    }
+
+    pub fn show_trip(
+        &mut self,
+        departure: Departure,
+        from_stop: String,
+        stop_position: Option<(f64, f64)>,
+    ) {
         self.map.set_route_overlay(None);
         self.view.set(Some(TransitView::Trip {
             id: next_view_id(),
             departure,
             from_stop,
+            stop_position,
         }));
     }
 

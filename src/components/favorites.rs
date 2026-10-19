@@ -2,15 +2,49 @@
 //! the journey planner offer them as one-tap shortcuts, and the favorites page lists them with
 //! live departures for the ones that are stops.
 //!
-//! Kept in `<data dir>/rusty_map/favorites.json` (e.g. `~/.local/share/rusty_map/` on Linux),
-//! rewritten on every change; in memory only where the platform has no data directory.
+//! A line in one direction at one stop ("metro 2 to Nation at Ternes") can be saved too, from
+//! one of its trips: the page then shows its next departures at a glance.
+//!
+//! Kept in `<data dir>/rusty_map/` (e.g. `~/.local/share/rusty_map/` on Linux) as
+//! `favorites.json` and `favorite_departures.json`, rewritten on every change; in memory only
+//! where the platform has no data directory.
 
 use std::path::PathBuf;
 
 use freya::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::place::SelectedPlace;
+use crate::components::{place::SelectedPlace, transit::Mode};
+
+/// One line in one direction at one stop, as the timetable names them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct StopLine {
+    /// The stop, as Transitous names it, and where it is.
+    pub stop: String,
+    pub lat: f64,
+    pub lon: f64,
+    /// Line name as shown on vehicles (`"2"`), and its colours (`0xRRGGBB`).
+    pub line: String,
+    pub mode: Mode,
+    pub color: Option<u32>,
+    pub text_color: Option<u32>,
+    /// The direction: where its vehicles are headed (`"Nation"`).
+    pub headsign: String,
+}
+
+impl StopLine {
+    fn same_as(&self, other: &StopLine) -> bool {
+        self.stop == other.stop && self.line == other.line && self.headsign == other.headsign
+    }
+
+    /// Stable per favorite, for diff keys.
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (&self.stop, &self.line, &self.headsign).hash(&mut hasher);
+        hasher.finish()
+    }
+}
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Favorite {
@@ -75,12 +109,15 @@ fn osm_element(url: &str) -> Option<(String, u64)> {
         .then(|| Some((kind.to_string(), id.parse().ok()?)))?
 }
 
-fn store_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("rusty_map").join("favorites.json"))
+const PLACES_FILE: &str = "favorites.json";
+const STOP_LINES_FILE: &str = "favorite_departures.json";
+
+fn store_path(file: &str) -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("rusty_map").join(file))
 }
 
-fn load() -> Vec<Favorite> {
-    let Some(path) = store_path() else {
+fn load<T: for<'de> Deserialize<'de>>(file: &str) -> Vec<T> {
+    let Some(path) = store_path(file) else {
         return Vec::new();
     };
     match std::fs::read_to_string(&path) {
@@ -95,8 +132,8 @@ fn load() -> Vec<Favorite> {
     }
 }
 
-fn save(list: &[Favorite]) {
-    let Some(path) = store_path() else {
+fn save<T: Serialize>(file: &str, list: &[T]) {
+    let Some(path) = store_path(file) else {
         return;
     };
     let result = (|| {
@@ -118,6 +155,8 @@ fn save(list: &[Favorite]) {
 #[derive(Clone, Copy, PartialEq)]
 pub struct Favorites {
     pub list: State<Vec<Favorite>>,
+    /// Saved lines-in-a-direction at a stop.
+    pub stop_lines: State<Vec<StopLine>>,
     /// The favorites page is showing.
     pub page_open: State<bool>,
 }
@@ -127,7 +166,8 @@ impl Favorites {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            list: use_state(load),
+            list: use_state(|| load(PLACES_FILE)),
+            stop_lines: use_state(|| load(STOP_LINES_FILE)),
             page_open: use_state(|| false),
         }
     }
@@ -147,14 +187,33 @@ impl Favorites {
         if list.len() == before {
             list.push(favorite);
         }
-        save(&list);
+        save(PLACES_FILE, &list);
         self.list.set(list);
+    }
+
+    pub fn has_stop_line(&self, stop_line: &StopLine) -> bool {
+        self.stop_lines
+            .read()
+            .iter()
+            .any(|saved| saved.same_as(stop_line))
+    }
+
+    /// Saves `stop_line`, or removes it when already saved.
+    pub fn toggle_stop_line(&mut self, stop_line: StopLine) {
+        let mut list = self.stop_lines.peek().clone();
+        let before = list.len();
+        list.retain(|saved| !saved.same_as(&stop_line));
+        if list.len() == before {
+            list.push(stop_line);
+        }
+        save(STOP_LINES_FILE, &list);
+        self.stop_lines.set(list);
     }
 
     pub fn remove(&mut self, favorite: &Favorite) {
         let mut list = self.list.peek().clone();
         list.retain(|saved| saved != favorite);
-        save(&list);
+        save(PLACES_FILE, &list);
         self.list.set(list);
     }
 }
