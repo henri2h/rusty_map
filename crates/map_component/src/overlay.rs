@@ -36,6 +36,86 @@ pub struct OverlayStop {
     pub major: bool,
 }
 
+/// The device's position, drawn as a dot inside its accuracy circle, pointing towards `bearing`
+/// when moving. Set through `MapController::user_location`.
+#[derive(Clone, Copy, PartialEq)]
+pub struct UserLocation {
+    /// World coordinates.
+    pub point: (f64, f64),
+    /// Latitude in degrees, for the meters-per-pixel scale of the accuracy circle.
+    pub lat: f64,
+    /// Radius (meters) the true position lies within, at 68% confidence.
+    pub accuracy_m: Option<f32>,
+    /// Heading in degrees clockwise from north, when moving.
+    pub bearing: Option<f32>,
+}
+
+impl UserLocation {
+    pub fn from_lonlat(lon: f64, lat: f64, accuracy_m: Option<f32>, bearing: Option<f32>) -> Self {
+        Self {
+            point: lonlat_to_world(lon, lat),
+            lat,
+            accuracy_m,
+            bearing,
+        }
+    }
+}
+
+/// Earth's equatorial circumference in meters: one world unit across at the equator.
+const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+const LOCATION_BLUE: SkColor = SkColor::from_rgb(26, 115, 232);
+
+pub(crate) fn draw_user_location(
+    canvas: &freya::engine::prelude::Canvas,
+    location: &UserLocation,
+    viewport: &Viewport,
+) {
+    let center = viewport.world_to_screen(location.point.0, location.point.1);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+
+    if let Some(accuracy) = location.accuracy_m {
+        let meters_per_px =
+            EARTH_CIRCUMFERENCE_M * location.lat.to_radians().cos() / viewport.world_px();
+        let radius = (accuracy as f64 / meters_per_px) as f32;
+        // Only when it reaches past the dot itself.
+        if radius > 10.0 {
+            paint.set_color(SkColor::from_argb(40, 26, 115, 232));
+            canvas.draw_circle(center, radius, &paint);
+            paint.set_style(PaintStyle::Stroke);
+            paint.set_stroke_width(1.0);
+            paint.set_color(SkColor::from_argb(110, 26, 115, 232));
+            canvas.draw_circle(center, radius, &paint);
+            paint.set_style(PaintStyle::Fill);
+        }
+    }
+
+    if let Some(bearing) = location.bearing {
+        // A wedge ahead of the dot, in the direction of travel.
+        let (sin, cos) = bearing.to_radians().sin_cos();
+        let at = |forward: f32, side: f32| {
+            (
+                center.0 + forward * sin + side * cos,
+                center.1 - forward * cos + side * sin,
+            )
+        };
+        let mut wedge = PathBuilder::new();
+        wedge.move_to(at(18.0, 0.0));
+        wedge.line_to(at(6.0, -7.0));
+        wedge.line_to(at(6.0, 7.0));
+        wedge.close();
+        paint.set_color(LOCATION_BLUE);
+        canvas.draw_path(&wedge.detach(), &paint);
+    }
+
+    paint.set_color(SkColor::from_argb(60, 0, 0, 0));
+    canvas.draw_circle((center.0, center.1 + 1.0), 9.5, &paint);
+    paint.set_color(SkColor::WHITE);
+    canvas.draw_circle(center, 9.0, &paint);
+    paint.set_color(LOCATION_BLUE);
+    canvas.draw_circle(center, 6.5, &paint);
+}
+
 impl OverlayPath {
     pub fn from_lonlat(points: &[(f64, f64)], color: Color, width: f32, dashed: bool) -> Self {
         Self {

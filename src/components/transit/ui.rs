@@ -1,6 +1,7 @@
 //! Building blocks shared by the transit drawer views: line badges, icons, status lines and
 //! French clock times.
 
+use crate::mobile::{SHEET_PERCENT, TOUCH, is_compact, text_size};
 use bytes::Bytes;
 use freya::{icons::lucide, prelude::*};
 
@@ -34,7 +35,7 @@ pub fn status_line(leading: Element, text: &str) -> Element {
         .child(
             label()
                 .text(text.to_string())
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(TEXT_MUTED),
         )
         .into_element()
@@ -63,16 +64,16 @@ pub fn line_badge(mode: Mode, line: &str, color: Option<u32>, text_color: Option
         .horizontal()
         .cross_align(Alignment::Center)
         .spacing(4.0)
-        .width(Size::px(56.0))
+        .width(Size::px(if TOUCH { 64.0 } else { 56.0 }))
         .main_align(Alignment::Center)
-        .padding((2.0f32, 6.0f32))
+        .padding(if TOUCH { (4.0, 6.0) } else { (2.0, 6.0) })
         .corner_radius(6.0f32)
         .background(background)
-        .child(icon(mode_icon(mode), foreground, 12.0))
+        .child(icon(mode_icon(mode), foreground, text_size(12.0)))
         .child(
             label()
                 .text(line.to_string())
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .font_weight(FontWeight::BOLD)
                 .color(foreground)
                 .max_lines(1),
@@ -170,10 +171,22 @@ pub const DRAWER_INSETS: Insets = Insets {
     left: 384.0,
 };
 
-/// Draws `overlay` on the map and frames it beside the drawer.
+/// Draws `overlay` on the map and frames it beside the drawer — above the bottom sheet, in the
+/// compact layout.
 pub fn show_on_map(map: &mut MapController, overlay: RouteOverlay) {
     if let Some(bounds) = overlay.world_bounds() {
-        map.fit_world_bounds(bounds, DRAWER_INSETS, 16.5);
+        let area = map.viewport_size.peek().size;
+        let insets = if is_compact(area.width) {
+            Insets {
+                top: 72.0,
+                right: 24.0,
+                bottom: area.height * SHEET_PERCENT / 100.0 + 24.0,
+                left: 24.0,
+            }
+        } else {
+            DRAWER_INSETS
+        };
+        map.fit_world_bounds(bounds, insets, 16.5);
     }
     map.set_route_overlay(Some(overlay));
 }
@@ -193,7 +206,7 @@ pub fn section_title(svg: Bytes, text: &str) -> Element {
         .child(
             label()
                 .text(text.to_string())
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .font_weight(FontWeight::BOLD)
                 .color(TEXT),
         )

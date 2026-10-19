@@ -8,6 +8,8 @@ use std::{
 };
 
 use freya::{icons::lucide, prelude::*};
+
+use crate::mobile::{SheetScroll, TOUCH, text_size, use_screen};
 use map_component::{
     OverlayPath, OverlayStop, RouteOverlay,
     util::{tiles::background_delay, viewport::center_to_lonlat},
@@ -68,6 +70,8 @@ pub struct Planner {}
 impl Component for Planner {
     fn render(&self) -> impl IntoElement {
         let mut transit = use_consume::<TransitController>();
+        // In the compact layout's bottom sheet, its grab bar (pull down) and back close it.
+        let compact = use_screen().compact;
         let from = transit.from.read().clone();
         let to = transit.to.read().clone();
         let active = *transit.active_field.read();
@@ -93,20 +97,20 @@ impl Component for Planner {
                     .cross_align(Alignment::Center)
                     .spacing(8.0)
                     .margin((0.0f32, 0.0f32, 10.0f32, 0.0f32))
-                    .child(
+                    .maybe_child((!compact).then(|| {
                         Button::new()
                             .flat()
-                            .compact()
+                            .maybe(!TOUCH, |button| button.compact())
                             .on_press({
                                 let mut transit = transit.clone();
                                 move |_: Event<PressEventData>| transit.close_planner()
                             })
-                            .child(icon(lucide::arrow_left(), TEXT_MUTED, 18.0)),
-                    )
+                            .child(icon(lucide::arrow_left(), TEXT_MUTED, 18.0))
+                    }))
                     .child(
                         label()
                             .text("Directions")
-                            .font_size(17.0)
+                            .font_size(text_size(17.0))
                             .font_weight(FontWeight::BOLD)
                             .color(TEXT),
                     )
@@ -122,7 +126,7 @@ impl Component for Planner {
                             .child(
                                 label()
                                     .text("Public transport")
-                                    .font_size(11.0)
+                                    .font_size(text_size(11.0))
                                     .color(ACCENT),
                             ),
                     ),
@@ -155,7 +159,7 @@ impl Component for Planner {
                     .child(
                         Button::new()
                             .flat()
-                            .compact()
+                            .maybe(!TOUCH, |button| button.compact())
                             .on_press(move |_: Event<PressEventData>| transit.swap_endpoints())
                             .child(icon(lucide::arrow_up_down(), TEXT_MUTED, 18.0)),
                     ),
@@ -164,7 +168,7 @@ impl Component for Planner {
             .maybe_child(hint.map(|hint| {
                 label()
                     .text(hint)
-                    .font_size(12.0)
+                    .font_size(text_size(12.0))
                     .color(TEXT_FAINT)
                     .margin((8.0f32, 0.0f32, 0.0f32, 4.0f32))
                     .into_element()
@@ -304,7 +308,7 @@ impl Component for EndpointField {
                             .child(
                                 label()
                                     .text(result.title().to_string())
-                                    .font_size(13.0)
+                                    .font_size(text_size(13.0))
                                     .color(TEXT)
                                     .max_lines(1)
                                     .text_overflow(TextOverflow::Ellipsis),
@@ -312,7 +316,7 @@ impl Component for EndpointField {
                             .maybe_child((!subtitle.is_empty()).then(|| {
                                 label()
                                     .text(subtitle)
-                                    .font_size(11.0)
+                                    .font_size(text_size(11.0))
                                     .color(TEXT_MUTED)
                                     .max_lines(1)
                                     .text_overflow(TextOverflow::Ellipsis)
@@ -360,7 +364,7 @@ impl Component for EndpointField {
                     .child({
                         // Toggles map picking for this field; filled while it's on.
                         let picking = self.picking;
-                        let mut button = Button::new().compact();
+                        let mut button = Button::new().maybe(!TOUCH, |button| button.compact());
                         button = if picking {
                             button.filled()
                         } else {
@@ -432,6 +436,8 @@ struct Itineraries {
 
 impl Component for Itineraries {
     fn render(&self) -> impl IntoElement {
+        // The sheet's scroll position, for its pull-to-close (see `mobile::SheetScroll`).
+        let scroll = use_consume::<SheetScroll>();
         let transit = use_consume::<TransitController>();
         let state = use_state(|| PlanLoad::Loading);
         let selected = use_state(|| 0usize);
@@ -500,10 +506,12 @@ impl Component for Itineraries {
             }
         };
 
-        ScrollView::new()
+        scroll
+            .track(ScrollView::new())
             .height(Size::fill())
             .direction(Direction::vertical())
             .margin((12.0f32, 0.0f32, 0.0f32, 0.0f32))
+            .child(scroll.marker())
             .children(body)
             .child(
                 rect()
@@ -513,7 +521,7 @@ impl Component for Itineraries {
                     .child(
                         label()
                             .text("Routes: Transitous · data sources")
-                            .font_size(11.0)
+                            .font_size(text_size(11.0))
                             .color(LINK),
                     ),
             )
@@ -624,7 +632,7 @@ fn itinerary_card(
                     .child(
                         label()
                             .text(format!("{}", (leg.end - leg.start + 30) / 60))
-                            .font_size(11.0)
+                            .font_size(text_size(11.0))
                             .color(TEXT_MUTED),
                     )
                     .into_element()
@@ -674,14 +682,14 @@ fn itinerary_card(
                             clock_time(itinerary.end)
                         ))
                         .width(Size::flex(1.0))
-                        .font_size(15.0)
+                        .font_size(text_size(15.0))
                         .font_weight(FontWeight::BOLD)
                         .color(TEXT),
                 )
                 .child(
                     label()
                         .text(duration_text(itinerary.duration_s()))
-                        .font_size(15.0)
+                        .font_size(text_size(15.0))
                         .font_weight(FontWeight::BOLD)
                         .color(TEXT),
                 ),
@@ -698,7 +706,7 @@ fn itinerary_card(
         .child(
             label()
                 .text(facts.join(" · "))
-                .font_size(11.0)
+                .font_size(text_size(11.0))
                 .color(TEXT_MUTED)
                 .width(Size::fill()),
         )
@@ -745,7 +753,7 @@ fn leg_detail(leg: &Leg) -> Element {
                         leg.to.name
                     ))
                     .width(Size::flex(1.0))
-                    .font_size(12.0)
+                    .font_size(text_size(12.0))
                     .color(TEXT_MUTED),
             )
             .into_element();
@@ -781,7 +789,7 @@ fn leg_detail(leg: &Leg) -> Element {
                 .child(
                     label()
                         .text(format!("→ {}", leg.headsign))
-                        .font_size(13.0)
+                        .font_size(text_size(13.0))
                         .font_weight(FontWeight::BOLD)
                         .color(TEXT)
                         .width(Size::fill()),
@@ -793,7 +801,7 @@ fn leg_detail(leg: &Leg) -> Element {
                             clock_time(leg.start),
                             leg.from.name
                         ))
-                        .font_size(12.0)
+                        .font_size(text_size(12.0))
                         .color(TEXT)
                         .width(Size::fill()),
                 )
@@ -804,7 +812,7 @@ fn leg_detail(leg: &Leg) -> Element {
                             if stops == 1 { "" } else { "s" },
                             duration_text(leg.end - leg.start)
                         ))
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(TEXT_FAINT),
                 )
                 .child(
@@ -814,14 +822,14 @@ fn leg_detail(leg: &Leg) -> Element {
                             clock_time(leg.end),
                             leg.to.name
                         ))
-                        .font_size(12.0)
+                        .font_size(text_size(12.0))
                         .color(TEXT)
                         .width(Size::fill()),
                 )
                 .maybe_child(live.map(|(text, color)| {
                     label()
                         .text(text)
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(color)
                         .into_element()
                 })),

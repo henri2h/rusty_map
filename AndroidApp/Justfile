@@ -1,0 +1,33 @@
+build:
+  ./gradlew assembleDebug
+
+install:
+  adb install app/build/outputs/apk/debug/app-debug.apk
+
+release:
+  ./gradlew assembleRelease
+
+install-release:
+  adb install app/build/outputs/apk/release/app-release.apk
+
+logcat:
+  adb shell run-as dev.rustymap.app logcat
+
+# Fast Rust type-check for Android (same env as the gradle build).
+check:
+  cd .. && ANDROID_HOME=${ANDROID_HOME:-$HOME/Android/Sdk} ANDROID_JAR=${ANDROID_HOME:-$HOME/Android/Sdk}/platforms/android-36/android.jar cargo ndk -t arm64-v8a --platform 31 check --lib
+
+# Debug APK with the on-screen frame-timing overlay (FPS, layout/render/present).
+build-perf:
+  CARGO_FEATURES=perf-overlay ./gradlew assembleDebug
+
+# Per-frame paint, tile fetch and compile timings in `logcat` (read at app start).
+log-perf:
+  adb shell setprop debug.rusty_map.log 'warn,rusty_map=info,map_component=debug'
+
+log-default:
+  adb shell setprop debug.rusty_map.log ''
+
+# Only this app's Rust logs.
+logcat-rust:
+  adb logcat -s rusty_map

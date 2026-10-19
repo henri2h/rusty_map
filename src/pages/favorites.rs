@@ -7,11 +7,14 @@
 use freya::{icons::lucide, prelude::*};
 use map_component::MapController;
 
-use crate::components::{
-    favorites::{Favorite, Favorites, StopLine},
-    place::PlaceController,
-    search::{SearchController, fly_to},
-    transit::{Departures, Endpoint, NextTimes, TransitController, line_badge},
+use crate::{
+    components::{
+        favorites::{Favorite, Favorites, StopLine},
+        place::PlaceController,
+        search::{SearchController, fly_to},
+        transit::{Departures, Endpoint, NextTimes, TransitController, line_badge},
+    },
+    mobile::{TOUCH, is_back, text_size, use_screen},
 };
 
 const TEXT: Color = Color::from_rgb(32, 33, 36);
@@ -22,7 +25,7 @@ const DIVIDER: Color = Color::from_rgb(232, 234, 237);
 const PAGE: Color = Color::from_rgb(246, 247, 249);
 const STAR: Color = Color::from_rgb(242, 153, 0);
 
-/// Width of the centred column holding the cards.
+/// Maximum width of the centred column holding the cards.
 const COLUMN_WIDTH: f32 = 640.0;
 
 #[derive(PartialEq)]
@@ -37,6 +40,7 @@ impl Component for FavoritesPage {
         let favorites = use_consume::<Favorites>();
         let transit = use_consume::<TransitController>();
         let mut page_open = favorites.page_open;
+        let insets = use_screen().insets;
         // A trip opened from one of the boards shows in the drawer instead, until closed.
         if !*page_open.read() || transit.view.read().is_some() {
             return rect().into_element();
@@ -54,7 +58,7 @@ impl Component for FavoritesPage {
                         "No favorites yet. Open a place on the map and press Save, or open a \
                          departure and save its line from that stop.",
                     )
-                    .font_size(14.0)
+                    .font_size(text_size(14.0))
                     .color(TEXT_MUTED)
                     .margin((24.0f32, 0.0f32))
                     .into_element(),
@@ -87,11 +91,11 @@ impl Component for FavoritesPage {
             .position(Position::new_absolute().top(0.).left(0.))
             .width(Size::percent(100.))
             .height(Size::percent(100.))
-            .layer(Layer::OverlayLevel(2))
+            .layer(Layer::OverlayLevel(3))
             .background(PAGE)
             .vertical()
             .on_global_key_down(move |e: Event<KeyboardEventData>| {
-                if e.key == Key::Named(NamedKey::Escape) {
+                if is_back(&e.key) {
                     page_open.set(false);
                 }
             })
@@ -101,7 +105,7 @@ impl Component for FavoritesPage {
                     .horizontal()
                     .cross_align(Alignment::Center)
                     .spacing(10.0)
-                    .padding((14.0f32, 16.0f32))
+                    .padding((14.0 + insets.top, 16.0, 14.0, 16.0))
                     .background(Color::WHITE)
                     .border(
                         Border::new()
@@ -112,7 +116,7 @@ impl Component for FavoritesPage {
                     .child(
                         Button::new()
                             .flat()
-                            .compact()
+                            .maybe(!TOUCH, |button| button.compact())
                             .on_press(move |_: Event<PressEventData>| page_open.set(false))
                             .child(icon(lucide::arrow_left(), TEXT_MUTED, 18.0)),
                     )
@@ -120,7 +124,7 @@ impl Component for FavoritesPage {
                     .child(
                         label()
                             .text("Favorites")
-                            .font_size(18.0)
+                            .font_size(text_size(18.0))
                             .font_weight(FontWeight::BOLD)
                             .color(TEXT),
                     ),
@@ -137,8 +141,10 @@ impl Component for FavoritesPage {
                             .horizontal()
                             .child(
                                 rect()
-                                    .width(Size::px(COLUMN_WIDTH))
-                                    .padding((8.0f32, 16.0f32, 24.0f32, 16.0f32))
+                                    // Narrower on a phone.
+                                    .width(Size::fill())
+                                    .max_width(Size::px(COLUMN_WIDTH))
+                                    .padding((8.0, 16.0, 24.0 + insets.bottom, 16.0))
                                     .vertical()
                                     .children(column),
                             ),
@@ -226,7 +232,7 @@ impl FavoritesPage {
                             .child(
                                 label()
                                     .text(favorite.name.clone())
-                                    .font_size(15.0)
+                                    .font_size(text_size(15.0))
                                     .font_weight(FontWeight::BOLD)
                                     .color(TEXT)
                                     .max_lines(1)
@@ -235,7 +241,7 @@ impl FavoritesPage {
                             .maybe_child((!favorite.kind.is_empty()).then(|| {
                                 label()
                                     .text(favorite.kind.clone())
-                                    .font_size(12.0)
+                                    .font_size(text_size(12.0))
                                     .color(TEXT_FAINT)
                                     .into_element()
                             })),
@@ -245,7 +251,7 @@ impl FavoritesPage {
                     .child(
                         Button::new()
                             .flat()
-                            .compact()
+                            .maybe(!TOUCH, |button| button.compact())
                             .on_press({
                                 let mut remove = remove;
                                 move |_: Event<PressEventData>| remove()
@@ -308,7 +314,7 @@ fn stop_line_card(stop_line: StopLine, mut favorites: Favorites) -> Element {
                         .child(
                             label()
                                 .text(format!("→ {}", stop_line.headsign))
-                                .font_size(14.0)
+                                .font_size(text_size(14.0))
                                 .font_weight(FontWeight::BOLD)
                                 .color(TEXT)
                                 .max_lines(1)
@@ -317,14 +323,14 @@ fn stop_line_card(stop_line: StopLine, mut favorites: Favorites) -> Element {
                         .child(
                             label()
                                 .text(format!("from {}", stop_line.stop))
-                                .font_size(12.0)
+                                .font_size(text_size(12.0))
                                 .color(TEXT_FAINT),
                         ),
                 )
                 .child(
                     Button::new()
                         .flat()
-                        .compact()
+                        .maybe(!TOUCH, |button| button.compact())
                         .on_press(move |_: Event<PressEventData>| {
                             favorites.toggle_stop_line(remove.clone())
                         })
@@ -340,7 +346,7 @@ fn stop_line_card(stop_line: StopLine, mut favorites: Favorites) -> Element {
 fn action(svg: Bytes, text: &'static str, mut on_press: impl FnMut() + 'static) -> Element {
     Button::new()
         .flat()
-        .compact()
+        .maybe(!TOUCH, |button| button.compact())
         .on_press(move |_: Event<PressEventData>| on_press())
         .child(
             rect()
@@ -348,7 +354,7 @@ fn action(svg: Bytes, text: &'static str, mut on_press: impl FnMut() + 'static) 
                 .cross_align(Alignment::Center)
                 .spacing(5.0)
                 .child(icon(svg, ACCENT, 15.0))
-                .child(label().text(text).font_size(12.0).color(ACCENT)),
+                .child(label().text(text).font_size(text_size(12.0)).color(ACCENT)),
         )
         .into_element()
 }
@@ -363,7 +369,7 @@ fn section_title(svg: Bytes, text: &'static str) -> Element {
         .child(
             label()
                 .text(text)
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .font_weight(FontWeight::BOLD)
                 .color(TEXT_MUTED),
         )

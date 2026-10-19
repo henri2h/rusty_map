@@ -2,6 +2,7 @@
 //! ([`TrackView`]) and every stop of one vehicle's run ([`TripView`]). Each fetches on mount and
 //! draws itself on the map.
 
+use crate::mobile::{TOUCH, tap_padding, text_size};
 use freya::{icons::lucide, prelude::*};
 use map_component::{OverlayPath, OverlayStop, RouteOverlay};
 
@@ -120,7 +121,7 @@ impl Component for TrackView {
                     body.push(
                         label()
                             .text("Tap a line for its whole route and stops. Data © OpenStreetMap contributors")
-                            .font_size(11.0)
+                            .font_size(text_size(11.0))
                             .color(TEXT_FAINT)
                             .margin((10.0f32, 0.0f32))
                             .into_element(),
@@ -155,7 +156,7 @@ fn track_header(info: &TrackInfo, kind_title: &str) -> Element {
         .child(
             label()
                 .text(title)
-                .font_size(18.0)
+                .font_size(text_size(18.0))
                 .font_weight(FontWeight::BOLD)
                 .color(TEXT)
                 .width(Size::fill()),
@@ -172,7 +173,7 @@ fn track_header(info: &TrackInfo, kind_title: &str) -> Element {
             (!parts.is_empty()).then(|| {
                 label()
                     .text(parts.join(" · "))
-                    .font_size(12.0)
+                    .font_size(text_size(12.0))
                     .color(TEXT_MUTED)
                     .into_element()
             })
@@ -198,7 +199,7 @@ fn route_row(route: &RouteInfo, way_id: Option<u64>, transit: &TransitController
         .content(Content::flex())
         .width(Size::fill())
         .spacing(10.0)
-        .padding((8.0f32, 4.0f32))
+        .padding((tap_padding(8.0), 4.0))
         .corner_radius(8.0f32)
         .cursor(CursorIcon::Pointer)
         .on_press(move |_: Event<PressEventData>| transit.show_line(opened.clone(), way_id))
@@ -210,14 +211,14 @@ fn route_row(route: &RouteInfo, way_id: Option<u64>, transit: &TransitController
                 .child(
                     label()
                         .text(route.name.clone())
-                        .font_size(13.0)
+                        .font_size(text_size(13.0))
                         .color(TEXT)
                         .width(Size::fill()),
                 )
                 .maybe_child(ends.map(|ends| {
                     label()
                         .text(ends)
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(TEXT_MUTED)
                         .width(Size::fill())
                         .into_element()
@@ -225,7 +226,7 @@ fn route_row(route: &RouteInfo, way_id: Option<u64>, transit: &TransitController
                 .maybe_child((!details.is_empty()).then(|| {
                     label()
                         .text(details)
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(TEXT_FAINT)
                         .width(Size::fill())
                         .into_element()
@@ -309,7 +310,7 @@ impl Component for LineView {
                         .child(
                             label()
                                 .text(route.name.clone())
-                                .font_size(16.0)
+                                .font_size(text_size(16.0))
                                 .font_weight(FontWeight::BOLD)
                                 .color(TEXT)
                                 .width(Size::fill()),
@@ -317,7 +318,7 @@ impl Component for LineView {
                         .maybe_child((!details.is_empty()).then(|| {
                             label()
                                 .text(details)
-                                .font_size(12.0)
+                                .font_size(text_size(12.0))
                                 .color(TEXT_MUTED)
                                 .into_element()
                         })),
@@ -337,7 +338,7 @@ impl Component for LineView {
                     body.push(
                         label()
                             .text("Tap a stop for this line's next departures there.")
-                            .font_size(11.0)
+                            .font_size(text_size(11.0))
                             .color(TEXT_FAINT)
                             .margin((0.0f32, 0.0f32, 6.0f32, 0.0f32))
                             .into_element(),
@@ -353,7 +354,7 @@ impl Component for LineView {
                             .width(Size::fill())
                             .cross_align(Alignment::Center)
                             .spacing(10.0)
-                            .padding((7.0f32, 4.0f32))
+                            .padding((tap_padding(7.0), 4.0))
                             .corner_radius(8.0f32)
                             .maybe(is_open, |r| r.background(Color::from_rgb(241, 244, 250)))
                             .cursor(CursorIcon::Pointer)
@@ -371,7 +372,7 @@ impl Component for LineView {
                                 label()
                                     .text(name.clone())
                                     .width(Size::flex(1.0))
-                                    .font_size(13.0)
+                                    .font_size(text_size(13.0))
                                     .color(TEXT),
                             )
                             .child(icon(
@@ -527,7 +528,7 @@ impl Component for TripView {
                     label()
                         .text(format!("→ {}", departure.headsign))
                         .width(Size::flex(1.0))
-                        .font_size(16.0)
+                        .font_size(text_size(16.0))
                         .font_weight(FontWeight::BOLD)
                         .color(TEXT),
                 ),
@@ -549,7 +550,7 @@ impl Component for TripView {
                 let saved = favorites.has_stop_line(&stop_line);
                 Button::new()
                     .flat()
-                    .compact()
+                    .maybe(!TOUCH, |button| button.compact())
                     .on_press(move |_: Event<PressEventData>| {
                         favorites.toggle_stop_line(stop_line.clone())
                     })
@@ -577,7 +578,7 @@ impl Component for TripView {
                                             self.from_stop
                                         )
                                     })
-                                    .font_size(12.0)
+                                    .font_size(text_size(12.0))
                                     .color(TEXT),
                             ),
                     )
@@ -636,7 +637,7 @@ fn trip_body(leg: &Leg, from_stop: &str) -> Vec<Element> {
     let mut body = vec![
         label()
             .text(facts.join(" · "))
-            .font_size(12.0)
+            .font_size(text_size(12.0))
             .color(TEXT_MUTED)
             .width(Size::fill())
             .margin((4.0f32, 0.0f32, 0.0f32, 0.0f32))
@@ -650,7 +651,7 @@ fn trip_body(leg: &Leg, from_stop: &str) -> Vec<Element> {
         body.push(
             label()
                 .text(text)
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(color)
                 .into_element(),
         );
@@ -742,7 +743,7 @@ fn stop_row(
             label()
                 .text(stop.name.clone())
                 .width(Size::flex(1.0))
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .font_weight(if here {
                     FontWeight::BOLD
                 } else {
@@ -759,7 +760,7 @@ fn stop_row(
                 } else {
                     stop.time.map(clock_time).unwrap_or_default()
                 })
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(if stop.cancelled { LATE } else { TEXT_MUTED }),
         )
         .into_element()

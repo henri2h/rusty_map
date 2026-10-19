@@ -12,7 +12,7 @@ pub mod util;
 
 pub use map_controller::{Insets, MapController};
 pub use map_input::{MapTap, TappedFeature, TappedLine};
-pub use overlay::{MapMarker, MarkerSet, OverlayPath, OverlayStop, RouteOverlay};
+pub use overlay::{MapMarker, MarkerSet, OverlayPath, OverlayStop, RouteOverlay, UserLocation};
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -28,8 +28,8 @@ use util::{
 };
 
 use map_input::{
-    MapInputState, build_on_global_pointer_up, build_on_mouse_move, build_on_pointer_down,
-    build_on_wheel,
+    MapInputState, TouchGesture, build_on_global_pointer_up, build_on_mouse_move,
+    build_on_pointer_down, build_on_touch, build_on_wheel,
 };
 use map_paint::paint_map;
 use map_style_loader::load_style;
@@ -123,6 +123,7 @@ impl Component for MapComponent {
         let marker_world_state = self.controller.marker_world;
         let route_overlay_state = self.controller.route_overlay;
         let markers_state = self.controller.markers;
+        let user_location_state = self.controller.user_location;
         let cursor = *self.controller.cursor.read();
         let style = self.controller.style.clone();
         let platform = self.controller.platform.clone();
@@ -252,8 +253,16 @@ impl Component for MapComponent {
         // On events
         let on_mouse_move = build_on_mouse_move(&input_state);
         let on_pointer_down = build_on_pointer_down(&input_state);
-        let on_global_pointer_up = build_on_global_pointer_up(&input_state);
+        let touch_gesture = use_hook(|| Rc::new(RefCell::new(TouchGesture::default())));
+        let on_global_pointer_up = build_on_global_pointer_up(&input_state, touch_gesture.clone());
         let on_wheel = build_on_wheel(&input_state);
+        // One handler for the four touch phases: shared, as event handlers aren't `Clone`.
+        let on_touch: Rc<RefCell<dyn FnMut(Event<TouchEventData>)>> =
+            Rc::new(RefCell::new(build_on_touch(&input_state, touch_gesture)));
+        let touch = |on_touch: &Rc<RefCell<dyn FnMut(Event<TouchEventData>)>>| {
+            let on_touch = on_touch.clone();
+            move |e: Event<TouchEventData>| (on_touch.borrow_mut())(e)
+        };
 
         rect()
             .width(self.layout.layout.width.clone())
@@ -269,6 +278,7 @@ impl Component for MapComponent {
                         let marker_world = *marker_world_state.peek();
                         let route_overlay = route_overlay_state.peek().clone();
                         let markers = markers_state.peek().clone();
+                        let user_location = *user_location_state.peek();
                         let style_now = style.borrow().clone();
 
                         paint_map(
@@ -302,6 +312,15 @@ impl Component for MapComponent {
                                 (context.size.width, context.size.height),
                             );
                         }
+                        // Topmost: where the user is matters more than anything under it.
+                        if let Some(location) = user_location {
+                            let viewport = util::viewport::Viewport::new(
+                                *center.peek(),
+                                *zoom.peek(),
+                                style_now.max_real_zoom,
+                            );
+                            overlay::draw_user_location(context.canvas, &location, &viewport);
+                        }
                     }))
                 };
 
@@ -332,6 +351,10 @@ impl Component for MapComponent {
                     .on_mouse_move(on_mouse_move)
                     .on_pointer_down(on_pointer_down)
                     .on_global_pointer_up(on_global_pointer_up)
+                    .on_touch_start(touch(&on_touch))
+                    .on_touch_move(touch(&on_touch))
+                    .on_touch_end(touch(&on_touch))
+                    .on_touch_cancel(touch(&on_touch))
                     .on_wheel(on_wheel)
             })
     }

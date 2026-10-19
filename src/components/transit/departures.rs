@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::mobile::{tap_padding, text_size};
 use freya::{icons::lucide, prelude::*};
 
 use map_component::util::tiles::background_delay;
@@ -208,7 +209,7 @@ impl Component for DepartureBoard {
                                 "Departures"
                             })
                             .width(Size::flex(1.0))
-                            .font_size(13.0)
+                            .font_size(text_size(13.0))
                             .font_weight(FontWeight::BOLD)
                             .color(TEXT),
                     ),
@@ -229,7 +230,7 @@ impl Component for DepartureBoard {
                     ))
                     .width(Size::fill())
                     .margin((0.0f32, 0.0f32, 4.0f32, 0.0f32))
-                    .font_size(11.0)
+                    .font_size(text_size(11.0))
                     .color(TEXT_FAINT)
                     .into_element()
             }))
@@ -240,7 +241,7 @@ impl Component for DepartureBoard {
                     .text(format!("Stop: {name}"))
                     .width(Size::fill())
                     .margin((0.0f32, 0.0f32, 4.0f32, 24.0f32))
-                    .font_size(11.0)
+                    .font_size(text_size(11.0))
                     .color(TEXT_FAINT)
                     .max_lines(1)
                     .text_overflow(TextOverflow::Ellipsis)
@@ -256,7 +257,7 @@ impl Component for DepartureBoard {
                     .child(
                         label()
                             .text("Timetables: Transitous · data sources")
-                            .font_size(11.0)
+                            .font_size(text_size(11.0))
                             .color(LINK),
                     ),
             )
@@ -317,7 +318,7 @@ fn departure_row(departure: &Departure, now: i64) -> impl IntoElement {
         .width(Size::fill())
         .cross_align(Alignment::Center)
         .spacing(10.0)
-        .padding((6.0f32, 0.0f32))
+        .padding((tap_padding(6.0), 0.0))
         .child(line_badge(
             departure.mode,
             &departure.line,
@@ -328,7 +329,7 @@ fn departure_row(departure: &Departure, now: i64) -> impl IntoElement {
             label()
                 .text(departure.headsign.clone())
                 .width(Size::flex(1.0))
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .color(if departure.cancelled {
                     TEXT_FAINT
                 } else {
@@ -357,7 +358,7 @@ fn departure_row(departure: &Departure, now: i64) -> impl IntoElement {
                         .child(
                             label()
                                 .text(when)
-                                .font_size(13.0)
+                                .font_size(text_size(13.0))
                                 .font_weight(FontWeight::BOLD)
                                 .color(when_color),
                         ),
@@ -365,7 +366,7 @@ fn departure_row(departure: &Departure, now: i64) -> impl IntoElement {
                 .maybe_child(detail.map(|(text, color)| {
                     label()
                         .text(text)
-                        .font_size(10.0)
+                        .font_size(text_size(10.0))
                         .color(color)
                         .into_element()
                 })),
@@ -432,7 +433,7 @@ impl Component for NextTimes {
         let note = |text: &str| {
             label()
                 .text(text.to_string())
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(TEXT_FAINT)
                 .into_element()
         };
@@ -465,7 +466,7 @@ impl Component for NextTimes {
                             let stop = found.stop.name.clone();
                             let position = (saved.lat, saved.lon);
                             rect()
-                                .padding((4.0f32, 10.0f32))
+                                .padding((tap_padding(4.0), 10.0))
                                 .corner_radius(8.0f32)
                                 .background(Color::from_rgb(244, 246, 248))
                                 .cursor(CursorIcon::Pointer)
@@ -519,14 +520,14 @@ fn time_chip(departure: &Departure, now: i64) -> impl IntoElement {
         .child(
             label()
                 .text(text)
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .font_weight(FontWeight::BOLD)
                 .color(color),
         )
         .maybe_child(late.map(|delay| {
             label()
                 .text(format!("+{delay}"))
-                .font_size(10.0)
+                .font_size(text_size(10.0))
                 .color(LATE)
                 .into_element()
         }))

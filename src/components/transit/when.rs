@@ -4,6 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::mobile::{TOUCH, text_size};
 use freya::{icons::lucide, prelude::*};
 
 use super::ui::{
@@ -175,11 +176,12 @@ impl Component for WhenPicker {
                         when.set(next);
                     }
                 })
-                .child(label().text(text).font_size(12.0).color(if selected {
-                    Color::WHITE
-                } else {
-                    TEXT_MUTED
-                }))
+                .child(
+                    label()
+                        .text(text)
+                        .font_size(text_size(12.0))
+                        .color(if selected { Color::WHITE } else { TEXT_MUTED }),
+                )
                 .into_element()
         };
         let time = current.time().unwrap_or_else(next_round_time);
@@ -218,7 +220,7 @@ impl Component for WhenPicker {
             let step = move |delta: i64, svg: Bytes| {
                 Button::new()
                     .flat()
-                    .compact()
+                    .maybe(!TOUCH, |button| button.compact())
                     .on_press(move |_: Event<PressEventData>| {
                         let current = *when.peek();
                         if let Some(time) = current.time() {
@@ -240,7 +242,7 @@ impl Component for WhenPicker {
                             .text(day_label(time, now))
                             .width(Size::px(92.0))
                             .text_align(TextAlign::Center)
-                            .font_size(13.0)
+                            .font_size(text_size(13.0))
                             .color(TEXT),
                     )
                     .child(step(86_400, lucide::chevron_right()))
@@ -253,7 +255,7 @@ impl Component for WhenPicker {
                 column = column.child(
                     label()
                         .text("This time is in the past")
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(LATE)
                         .margin((0.0f32, 0.0f32, 0.0f32, indent)),
                 );

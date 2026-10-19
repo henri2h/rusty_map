@@ -3,6 +3,11 @@ name = "rusty_map"
 version = "0.1.0"
 edition = "2024"
 
+# cdylib: the Android app loads the crate as `librusty_map.so` (see `AndroidApp/`).
+[lib]
+name = "rusty_map"
+crate-type = ["cdylib", "rlib"]
+
 # For profiling
 [profile.release]
 debug = true
@@ -20,6 +25,17 @@ opt-level = 3
 [profile.dev]
 opt-level = 1
 
+# Debug APKs (`AndroidApp`, `./gradlew assembleDebug`): dependencies optimised like release, the
+# app crate light and incremental, so a rebuild after an edit stays short.
+[profile.android-dev]
+inherits = "release"
+debug = false
+incremental = true
+codegen-units = 256
+
+[profile.android-dev.package.rusty_map]
+opt-level = 1
+
 [profile.profiling]
 inherits = "release"
 debug = true
@@ -29,6 +45,9 @@ members = ["crates/map_component"]
 
 [features]
 hotreload = ["freya/hotreload"]
+# On-screen frame timings (FPS, layout/render/present) — for profiling on a phone, where there's no
+# profiler at hand. `cargo ndk ... build --features perf-overlay`, or see AndroidApp/Justfile.
+perf-overlay = ["dep:freya-metrics-plugin"]
 
 [dependencies]
 freya = { path = "../freya/crates/freya", features = [
@@ -40,6 +59,7 @@ freya-icons = { path = "../freya/crates/freya-icons", features = ["lucide"] }
 map_component = { path = "crates/map_component" }
 freya-router = { path = "../freya/crates/freya-router" }
 torin = { path = "../freya/crates/torin" }
+freya-metrics-plugin = { path = "../freya/crates/freya-metrics-plugin", optional = true }
 
 mvt-reader = "2.4.0"
 geo-types = "0.7"
@@ -48,7 +68,7 @@ reqwest = { version = "0.12", features = [
   "rustls-tls",
   "gzip",
 ], default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
 bytes = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -60,5 +80,7 @@ env_logger = "0.11"
 freya-android = { path = "../freya/crates/freya-android" }
 freya-winit = { path = "../freya/crates/freya-winit" }
 android_logger = "0.15"
+# Calls into `MainActivity`: location updates, haptics (see `src/mobile.rs`).
+jni = "0.21"
 winit = { version = "0.30", features = ["android-native-activity", "rwh_06"] }
 robius-location = { git = "https://github.com/project-robius/robius" }

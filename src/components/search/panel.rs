@@ -28,13 +28,20 @@ use map_component::{
     },
 };
 
-use crate::components::{
-    charging::ChargerLive,
-    favorites::{Favorite, Favorites},
-    place::{PlaceController, SelectedPlace, humanize},
-    transit::{
-        Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
-        TripView,
+use crate::{
+    components::{
+        charging::ChargerLive,
+        favorites::{Favorite, Favorites},
+        place::{PlaceController, SelectedPlace, humanize},
+        transit::{
+            Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
+            TripView,
+        },
+    },
+    mobile::{
+        Haptic, Pull, SHEET_PERCENT, Screen, SheetScroll, TOUCH, haptic, is_compact, on_pull_end,
+        on_pull_move, on_pull_start, on_sheet_pull_start, share, tap_padding, text_size,
+        use_screen, use_sheet_scroll,
     },
 };
 
@@ -98,6 +105,24 @@ impl Component for SearchPanel {
         // Favorites show only while the search box has focus — when the user starts a search.
         let input_id = use_a11y();
         let input_focus = use_focus(input_id);
+        let screen = use_screen();
+        let mut sheet_expanded = use_state(|| false);
+        let pull = use_state(Pull::default);
+        // The sheet's scrolled content, so a pull anywhere on it doesn't fight its scrolling.
+        let sheet_scroll = use_sheet_scroll();
+        use_provide_context(move || sheet_scroll);
+        // Each time the drawer opens, the sheet starts at half height.
+        use_side_effect({
+            let (selected, view, planner_open) =
+                (places.selected_place, transit.view, transit.planner_open);
+            move || {
+                let open =
+                    selected.read().is_some() || view.read().is_some() || *planner_open.read();
+                if !open && *sheet_expanded.peek() {
+                    sheet_expanded.set(false);
+                }
+            }
+        });
 
         let on_validate = build_on_search_input(map, places, search);
         let has_query = !search.query.read().is_empty();
@@ -107,8 +132,23 @@ impl Component for SearchPanel {
         let view = transit.view.read().clone();
         let planner_open = *transit.planner_open.read();
         let drawer_open = place.is_some() || view.is_some() || planner_open;
-        let dropdown = (!drawer_open && status != SearchStatus::Idle)
-            .then(|| results_dropdown(status, results, map, places, search));
+        // Compact layout: a search in progress takes the bottom sheet too, the results under
+        // the box.
+        let searching = screen.compact
+            && !drawer_open
+            && (input_focus().is_focused() || has_query || status != SearchStatus::Idle);
+        let sheet = screen.compact && (drawer_open || searching);
+        let dropdown = (!drawer_open && status != SearchStatus::Idle).then(|| {
+            results_dropdown(
+                status,
+                results,
+                searching,
+                sheet_scroll,
+                map,
+                places,
+                search,
+            )
+        });
         let rounded = !drawer_open && dropdown.is_none();
 
         let shadow = if drawer_open {
@@ -145,7 +185,27 @@ impl Component for SearchPanel {
                     .focus_border_fill(Color::TRANSPARENT),
             )
             .width(Size::fill())
-            .leading(icon(lucide::search(), TEXT_FAINT))
+            .leading(if searching {
+                // The search sheet's visible way out (as are back and pulling the sheet down).
+                let mut search = search.clone();
+                rect()
+                    .cursor(CursorIcon::Pointer)
+                    .child(
+                        icon(lucide::arrow_left(), TEXT_MUTED)
+                            // The input claims the pointer otherwise (see the ✕ below).
+                            .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
+                            .on_press(move |e: Event<PressEventData>| {
+                                e.stop_propagation();
+                                e.prevent_default();
+                                haptic(Haptic::Press);
+                                search.reset(String::new());
+                                input_id.request_unfocus();
+                            }),
+                    )
+                    .into_element()
+            } else {
+                icon(lucide::search(), TEXT_FAINT).into_element()
+            })
             .a11y_id(input_id)
             .on_validate(on_validate);
         if !has_query {
@@ -157,6 +217,7 @@ impl Component for SearchPanel {
                         .on_press(move |e: Event<PressEventData>| {
                             e.stop_propagation();
                             e.prevent_default();
+                            haptic(Haptic::Press);
                             transit.open_planner(None);
                         }),
                 ),
@@ -202,37 +263,181 @@ impl Component for SearchPanel {
             }
             content.extend(dropdown);
             if let Some(view) = view {
-                content.push(transit_view(view, transit.clone()));
+                content.push(transit_view(view, transit.clone(), sheet_scroll));
             } else if let Some(place) = place {
-                content.push(place_details(place, transit.clone(), favorites).into_element());
+                content.push(
+                    place_details(place, transit.clone(), favorites, sheet_scroll).into_element(),
+                );
             }
             content
         };
 
-        rect()
-            .position(Position::new_absolute().top(0.0f32).left(0.0f32))
-            .width(Size::px(PANEL_WIDTH))
-            .maybe(drawer_open, |r| r.height(Size::percent(100.)))
+        let on_back = {
+            let mut places = places.clone();
+            let mut search = search.clone();
+            let mut transit = transit.clone();
+            move |e: Event<KeyboardEventData>| {
+                if e.key != Key::Named(NamedKey::BrowserBack) {
+                    return;
+                }
+                // The pick banner's own handler stops picking.
+                if *transit.picking.peek() && *transit.planner_open.peek() {
+                    return;
+                }
+                if transit.view.peek().is_some() {
+                    transit.close_view();
+                } else if *transit.planner_open.peek() {
+                    transit.close_planner();
+                } else {
+                    search.reset(String::new());
+                    places.clear();
+                    input_id.request_unfocus();
+                }
+            }
+        };
+
+        let panel = if sheet {
+            bottom_sheet(screen, *sheet_expanded.read(), pull.read().offset)
+        } else if screen.compact {
+            rect()
+                .position(Position::new_absolute().top(0.0f32).left(0.0f32))
+                // The window's width less the margins on both sides.
+                .width(Size::func_data(|c| Some(c.root - 24.0), &"pill"))
+                .margin((12.0 + screen.insets.top, 12.0, 12.0, 12.0))
+                .padding(8.0f32)
+        } else {
+            rect()
+                .position(Position::new_absolute().top(0.0f32).left(0.0f32))
+                .width(Size::px(PANEL_WIDTH))
+                .maybe(drawer_open, |r| r.height(Size::percent(100.)))
+                .maybe(!drawer_open, |r| {
+                    r.margin((12.0 + screen.insets.top, 12.0, 12.0, 12.0))
+                })
+                .padding(if drawer_open {
+                    (
+                        16.0 + screen.insets.top,
+                        16.0,
+                        16.0 + screen.insets.bottom,
+                        16.0,
+                    )
+                } else {
+                    (8.0, 8.0, 8.0, 8.0)
+                })
+        };
+        // What pulling the sheet down (or tapping its bar) does: end the search; else shrink a
+        // full-height sheet; else close what it shows, as back does.
+        let close_sheet = {
+            let mut places = places.clone();
+            let mut search = search.clone();
+            let mut transit = transit.clone();
+            move || {
+                if searching {
+                    search.reset(String::new());
+                    input_id.request_unfocus();
+                } else if *sheet_expanded.peek() {
+                    sheet_expanded.set(false);
+                } else if transit.view.peek().is_some() {
+                    transit.close_view();
+                } else if *transit.planner_open.peek() {
+                    transit.close_planner();
+                } else {
+                    search.reset(String::new());
+                    places.clear();
+                }
+            }
+        };
+        let handle = if searching {
+            sheet_handle(pull, close_sheet.clone())
+        } else if sheet {
+            sheet_handle(pull, move || sheet_expanded.toggle())
+        } else {
+            // Keeps the children's positions, and so the input and its focus, when the pill
+            // turns into the sheet.
+            rect().into_element()
+        };
+
+        panel
             .background(Color::from_argb(250, 255, 255, 255))
-            .corner_radius(match (drawer_open, rounded) {
-                (true, _) => 0.0f32,
-                (false, true) => 24.0f32,
-                (false, false) => 12.0f32,
+            .maybe(!sheet, |r| {
+                r.corner_radius(match (drawer_open, rounded) {
+                    (true, _) => 0.0f32,
+                    (false, true) => 24.0f32,
+                    (false, false) => 12.0f32,
+                })
+                .shadow(shadow)
             })
-            .shadow(shadow)
             // Without this, the map canvas's own paint callback (rebuilt fresh on every
             // zoom-triggered `.key()` change) can land after this element in the base layer's
             // paint order and draw over it — seen as the panel flickering while zooming.
-            .layer(Layer::Overlay)
-            .maybe(!drawer_open, |r| r.margin(12.0f32))
-            .padding(if drawer_open { 16.0f32 } else { 8.0f32 })
+            // Level 2, not `Overlay`: Freya paints one layer's nodes in no set order, and the
+            // bottom sheet must cover the map controls (`Overlay`, ~2047 + depth — above level
+            // 1). Under the favorites page (3) and the layers modal (4).
+            .layer(Layer::OverlayLevel(2))
             .vertical()
+            .on_global_key_down(on_back)
+            // The whole sheet pulls down, not only its grab bar (see `on_sheet_pull_start`).
+            .maybe(sheet, |r| {
+                r.on_pointer_down(on_sheet_pull_start(pull, sheet_scroll))
+            })
+            .on_global_pointer_move(on_pull_move(pull))
+            .on_global_pointer_up(on_pull_end(pull, close_sheet))
+            .child(handle)
             .children(content)
     }
 }
 
+/// Compact layout's drawer and search: a sheet along the bottom edge, leaving the top of the map
+/// visible, or `full` height; `pulled` down by that much (see [`Pull`]).
+fn bottom_sheet(screen: Screen, full: bool, pulled: f32) -> Rect {
+    let top = screen.insets.top;
+    rect()
+        .position(Position::new_absolute().bottom(-pulled).left(0.0f32))
+        .width(Size::window_percent(100.))
+        .height(if full {
+            Size::func_data(move |c| Some(c.root - top), &(top as u32))
+        } else {
+            Size::window_percent(SHEET_PERCENT)
+        })
+        .padding((0.0, 16.0, 16.0 + screen.insets.bottom, 16.0))
+        .corner_radius((16.0f32, 16.0f32, 0.0f32, 0.0f32))
+        .shadow((
+            0.0f32,
+            -2.0f32,
+            12.0f32,
+            0.0f32,
+            Color::from_argb(60, 0, 0, 0),
+        ))
+}
+
+/// The grab bar atop the bottom sheet: pulling it down closes the sheet (see `close_sheet`); a
+/// tap toggles a place's sheet between half and full height, or closes the search. Pulls start
+/// here only, so scrolling the sheet's content never drags it.
+fn sheet_handle(pull: State<Pull>, mut on_press: impl FnMut() + 'static) -> Element {
+    rect()
+        .width(Size::fill())
+        .padding((tap_padding(10.0), 0.0))
+        .center()
+        .on_pointer_down(on_pull_start(pull))
+        .on_press(move |_: Event<PressEventData>| {
+            // The release of a pull, not a tap.
+            if pull.peek().moved {
+                return;
+            }
+            haptic(Haptic::Press);
+            on_press();
+        })
+        .child(
+            rect()
+                .width(Size::px(36.0))
+                .height(Size::px(4.0))
+                .corner_radius(2.0f32)
+                .background(DIVIDER),
+        )
+        .into_element()
+}
+
 /// A transit view (tapped track, a line, or a trip) under a "Back" row returning to what was there.
-fn transit_view(view: TransitView, transit: TransitController) -> Element {
+fn transit_view(view: TransitView, transit: TransitController, scroll: SheetScroll) -> Element {
     let mut close = transit.clone();
     let content = match view {
         TransitView::Line { id, route, way_id } => LineView { id, route, way_id }.into_element(),
@@ -275,7 +480,7 @@ fn transit_view(view: TransitView, transit: TransitController) -> Element {
         .child(
             Button::new()
                 .flat()
-                .compact()
+                .maybe(!TOUCH, |button| button.compact())
                 .on_press(move |_: Event<PressEventData>| close.close_view())
                 .child(
                     rect()
@@ -283,14 +488,21 @@ fn transit_view(view: TransitView, transit: TransitController) -> Element {
                         .cross_align(Alignment::Center)
                         .spacing(6.0)
                         .child(icon(lucide::arrow_left(), TEXT_MUTED))
-                        .child(label().text("Back").font_size(13.0).color(TEXT_MUTED)),
+                        .child(
+                            label()
+                                .text("Back")
+                                .font_size(text_size(13.0))
+                                .color(TEXT_MUTED),
+                        ),
                 ),
         )
         .child(
-            ScrollView::new()
+            scroll
+                .track(ScrollView::new())
                 .height(Size::fill())
                 .direction(Direction::vertical())
                 .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
+                .child(scroll.marker())
                 .child(content),
         )
         .into_element()
@@ -313,22 +525,27 @@ fn divider() -> impl IntoElement {
 
 /// The pill's dropdown: the result rows, or a one-line status when there's nothing to list yet.
 /// Older results stay visible while a refined query is still debouncing/in flight, rather than
-/// flashing to "Searching…" on every keystroke.
+/// flashing to "Searching…" on every keystroke. `fill`: down to the bottom of the search sheet
+/// (compact layout) rather than a capped dropdown.
 fn results_dropdown(
     status: SearchStatus,
     results: Vec<SearchResult>,
+    fill: bool,
+    scroll: SheetScroll,
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
 ) -> Element {
     let body = if !results.is_empty() {
-        ScrollView::new()
+        scroll
+            .track(ScrollView::new())
             // `ScrollView` defaults to `height: fill()`, which resolves to nothing inside this
             // panel's content-sized pill height — shrink to the rows' own height instead,
             // capped by `max_height`.
-            .height(Size::auto())
-            .max_height(Size::px(RESULTS_MAX_HEIGHT))
+            .height(if fill { Size::fill() } else { Size::auto() })
+            .maybe(!fill, |r| r.max_height(Size::px(RESULTS_MAX_HEIGHT)))
             .direction(Direction::vertical())
+            .child(scroll.marker())
             .children(
                 results
                     .into_iter()
@@ -350,13 +567,19 @@ fn results_dropdown(
             .spacing(10.0)
             .padding((12.0f32, 8.0f32))
             .child(icon(svg, TEXT_FAINT))
-            .child(label().text(text).font_size(13.0).color(TEXT_MUTED))
+            .child(
+                label()
+                    .text(text)
+                    .font_size(text_size(13.0))
+                    .color(TEXT_MUTED),
+            )
             .into_element()
     };
 
     rect()
         .vertical()
         .width(Size::fill())
+        .maybe(fill, |r| r.height(Size::fill()))
         .padding((4.0f32, 0.0f32, 0.0f32, 0.0f32))
         .child(divider())
         .child(body)
@@ -395,7 +618,7 @@ fn result_row(
                 .width(Size::fill())
                 .cross_align(Alignment::Center)
                 .spacing(12.0)
-                .padding((6.0f32, 4.0f32))
+                .padding((tap_padding(6.0), 4.0))
                 .child(icon(lucide::map_pin(), TEXT_FAINT))
                 .child(
                     rect()
@@ -404,7 +627,7 @@ fn result_row(
                         .child(
                             label()
                                 .text(title)
-                                .font_size(14.0)
+                                .font_size(text_size(14.0))
                                 .color(TEXT)
                                 .max_lines(1)
                                 .text_overflow(TextOverflow::Ellipsis),
@@ -413,7 +636,7 @@ fn result_row(
                             r.child(
                                 label()
                                     .text(subtitle)
-                                    .font_size(12.0)
+                                    .font_size(text_size(12.0))
                                     .color(TEXT_MUTED)
                                     .max_lines(1)
                                     .text_overflow(TextOverflow::Ellipsis),
@@ -434,12 +657,18 @@ pub fn fly_to(map: &MapController, lat: f64, lon: f64) {
     // middle. Shift by the free area's middle in pixels, converted through the same
     // `pixels_to_center_delta` panning uses, so the target lands where the user is looking.
     let area = map.viewport_size.peek().size;
-    let free_width = (area.width - PANEL_WIDTH).max(0.0);
+    // The drawer covers the left side; in the compact layout, the bottom sheet the lower part.
+    let (free_x, free_y) = if is_compact(area.width) {
+        (
+            area.width / 2.0,
+            area.height * (1.0 - SHEET_PERCENT / 100.0) / 2.0,
+        )
+    } else {
+        let free_width = (area.width - PANEL_WIDTH).max(0.0);
+        (area.width - free_width / 2.0, area.height / 2.0)
+    };
     let half_offset = Viewport::new(CursorPoint::zero(), target_zoom, max_real_zoom)
-        .pixels_to_center_delta(
-            (area.width - free_width / 2.0) as f64,
-            area.height as f64 / 2.0,
-        );
+        .pixels_to_center_delta(free_x as f64, free_y as f64);
     let raw_center = lonlat_to_center(lon, lat);
     center.set(CursorPoint::new(
         raw_center.x - half_offset.x,
@@ -490,11 +719,14 @@ pub fn favorite_chip(name: &str, stop: bool, mut on_press: impl FnMut() + 'stati
         .horizontal()
         .cross_align(Alignment::Center)
         .spacing(5.0)
-        .padding((4.0f32, 10.0f32))
+        .padding((tap_padding(4.0), 10.0))
         .corner_radius(14.0f32)
         .background(SURFACE_ALT)
         .cursor(CursorIcon::Pointer)
-        .on_press(move |_: Event<PressEventData>| on_press())
+        .on_press(move |_: Event<PressEventData>| {
+            haptic(Haptic::Press);
+            on_press();
+        })
         .child(
             SvgViewer::new(if stop {
                 lucide::train_front()
@@ -508,7 +740,7 @@ pub fn favorite_chip(name: &str, stop: bool, mut on_press: impl FnMut() + 'stati
         .child(
             label()
                 .text(name.to_string())
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(TEXT)
                 .max_lines(1),
         )
@@ -574,6 +806,7 @@ fn place_details(
     place: SelectedPlace,
     transit: TransitController,
     mut favorites: Favorites,
+    scroll: SheetScroll,
 ) -> impl IntoElement {
     let favorite = Favorite::from_place(&place);
     let saved = favorite
@@ -636,7 +869,12 @@ fn place_details(
                 .corner_radius(12.0f32)
                 .background(SURFACE_ALT)
                 .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32))
-                .child(label().text(subtitle).font_size(12.0).color(TEXT_MUTED))
+                .child(
+                    label()
+                        .text(subtitle)
+                        .font_size(text_size(12.0))
+                        .color(TEXT_MUTED),
+                )
                 .into_element(),
         );
     }
@@ -662,7 +900,7 @@ fn place_details(
                     .child(
                         label()
                             .text("Directions")
-                            .font_size(13.0)
+                            .font_size(text_size(13.0))
                             .color(Color::WHITE),
                     ),
             );
@@ -687,7 +925,7 @@ fn place_details(
                         .child(
                             label()
                                 .text(if saved { "Saved" } else { "Save" })
-                                .font_size(13.0)
+                                .font_size(text_size(13.0))
                                 .color(TEXT),
                         ),
                 )
@@ -724,7 +962,7 @@ fn place_details(
                     .children(
                         pair.iter()
                             .cloned()
-                            .map(|(label, url)| link_chip(label, url).into_element()),
+                            .map(|(label, url)| link_chip(label, url, &title).into_element()),
                     )
                     .maybe(pair.len() == 1, |r| r.child(rect().width(Size::flex(1.0))))
                     .into_element(),
@@ -763,7 +1001,7 @@ fn place_details(
                 .child(
                     label()
                         .text("Loading details…")
-                        .font_size(12.0)
+                        .font_size(text_size(12.0))
                         .color(TEXT_FAINT),
                 )
                 .into_element(),
@@ -772,7 +1010,7 @@ fn place_details(
         body.push(
             label()
                 .text("No further details for this place.")
-                .font_size(12.0)
+                .font_size(text_size(12.0))
                 .color(TEXT_FAINT)
                 .margin((8.0f32, 0.0f32))
                 .into_element(),
@@ -799,10 +1037,12 @@ fn place_details(
         );
     }
 
-    ScrollView::new()
+    scroll
+        .track(ScrollView::new())
         .height(Size::fill())
         .direction(Direction::vertical())
         .margin((16.0f32, 0.0f32, 0.0f32, 0.0f32))
+        .child(scroll.marker())
         .children(body)
 }
 
@@ -869,11 +1109,16 @@ fn detail_row(key: String, value: String) -> Element {
             .child(
                 label()
                     .text(value)
-                    .font_size(14.0)
+                    .font_size(text_size(14.0))
                     .color(TEXT)
                     .width(Size::fill()),
             )
-            .child(label().text(key.clone()).font_size(11.0).color(TEXT_FAINT)),
+            .child(
+                label()
+                    .text(key.clone())
+                    .font_size(text_size(11.0))
+                    .color(TEXT_FAINT),
+            ),
     )
     .into_element()
 }
@@ -909,11 +1154,16 @@ impl Component for CoordinatesRow {
                 .child(
                     label()
                         .text(self.value.clone())
-                        .font_size(14.0)
+                        .font_size(text_size(14.0))
                         .color(TEXT)
                         .width(Size::fill()),
                 )
-                .child(label().text(hint).font_size(11.0).color(TEXT_FAINT)),
+                .child(
+                    label()
+                        .text(hint)
+                        .font_size(text_size(11.0))
+                        .color(TEXT_FAINT),
+                ),
         )
     }
 }
@@ -938,14 +1188,14 @@ fn opening_hours_row(value: String) -> impl IntoElement {
                         label()
                             .text(rule.days)
                             .width(Size::px(96.0))
-                            .font_size(13.0)
+                            .font_size(text_size(13.0))
                             .color(TEXT_MUTED),
                     )
                     .child(
                         label()
                             .text(rule.hours)
                             .width(Size::flex(1.0))
-                            .font_size(13.0)
+                            .font_size(text_size(13.0))
                             .color(TEXT),
                     )
                     .into_element()
@@ -953,7 +1203,7 @@ fn opening_hours_row(value: String) -> impl IntoElement {
             .child(
                 label()
                     .text("Opening hours")
-                    .font_size(11.0)
+                    .font_size(text_size(11.0))
                     .color(TEXT_FAINT),
             ),
     )
@@ -977,14 +1227,14 @@ fn wikipedia_block(intro: String) -> impl IntoElement {
                 .child(
                     label()
                         .text("From Wikipedia")
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(TEXT_FAINT),
                 )
                 // The intro's licence, which reusing Wikipedia text requires showing.
                 .child(
                     label()
                         .text("CC BY-SA 4.0")
-                        .font_size(11.0)
+                        .font_size(text_size(11.0))
                         .color(TEXT_FAINT)
                         .cursor(CursorIcon::Pointer)
                         .on_press(|_: Event<PressEventData>| {
@@ -996,21 +1246,39 @@ fn wikipedia_block(intro: String) -> impl IntoElement {
         .child(
             label()
                 .text(intro)
-                .font_size(13.0)
+                .font_size(text_size(13.0))
                 .color(TEXT)
                 .width(Size::fill()),
         )
 }
 
-/// A compact action button — website/Wikipedia/OSM/… — that opens `url` in the system browser.
-fn link_chip(link_label: String, url: String) -> impl IntoElement {
-    let svg = detail_icon(&link_label).unwrap_or_else(lucide::external_link);
+/// A compact action button — website/Wikipedia/… — that opens `url` in the system browser. The
+/// OpenStreetMap link shares the place instead (`title` and that link): the system share sheet
+/// on Android, copying the link elsewhere.
+fn link_chip(link_label: String, url: String, title: &str) -> impl IntoElement {
+    let sharing = link_label == "OpenStreetMap";
+    let (svg, link_label) = match (sharing, TOUCH) {
+        (true, true) => (lucide::share_2(), "Share".to_string()),
+        (true, false) => (lucide::copy(), "Copy link".to_string()),
+        (false, _) => (
+            detail_icon(&link_label).unwrap_or_else(lucide::external_link),
+            link_label,
+        ),
+    };
+    let title = title.to_string();
 
     Button::new()
         .outline()
-        .compact()
+        .maybe(!TOUCH, |button| button.compact())
         .width(Size::flex(1.0))
-        .on_press(move |_: Event<PressEventData>| Platform::get().open_url(url.clone()))
+        .on_press(move |_: Event<PressEventData>| {
+            if sharing {
+                haptic(Haptic::Press);
+                share(&title, &url);
+            } else {
+                Platform::get().open_url(url.clone());
+            }
+        })
         .child(
             rect()
                 .horizontal()
@@ -1020,7 +1288,7 @@ fn link_chip(link_label: String, url: String) -> impl IntoElement {
                 .child(
                     label()
                         .text(link_label)
-                        .font_size(13.0)
+                        .font_size(text_size(13.0))
                         .color(ACCENT)
                         .max_lines(1)
                         .text_overflow(TextOverflow::Ellipsis),
@@ -1065,7 +1333,7 @@ impl Component for RawTags {
                                 label()
                                     .text(header)
                                     .width(Size::flex(1.0))
-                                    .font_size(12.0)
+                                    .font_size(text_size(12.0))
                                     .color(TEXT_MUTED),
                             )
                             .child(
@@ -1087,14 +1355,14 @@ impl Component for RawTags {
                             label()
                                 .text(key.clone())
                                 .width(Size::px(130.0))
-                                .font_size(12.0)
+                                .font_size(text_size(12.0))
                                 .color(TEXT_FAINT),
                         )
                         .child(
                             label()
                                 .text(value.clone())
                                 .width(Size::flex(1.0))
-                                .font_size(12.0)
+                                .font_size(text_size(12.0))
                                 .color(TEXT),
                         )
                         .into_element()

@@ -1,2 +1,4 @@
 /target
 /tools/martin/
+.log
+*.log

@@ -157,6 +157,11 @@ impl Viewport {
         )
     }
 
+    /// Screen pixels per world unit (the whole world's width at the current zoom).
+    pub fn world_px(&self) -> f64 {
+        2f64.powi(self.zoom_z as i32) * self.tile_px as f64
+    }
+
     /// Inverse of [`Self::screen_to_world`] for the current frame's viewport.
     pub fn world_to_screen(&self, world_x: f64, world_y: f64) -> (f32, f32) {
         let scale = 2f64.powi(self.zoom_z as i32);

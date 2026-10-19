@@ -195,6 +195,7 @@ pub fn build_on_pointer_down(s: &MapInputState) -> impl FnMut(Event<PointerEvent
 
 pub fn build_on_global_pointer_up(
     s: &MapInputState,
+    gesture: Rc<RefCell<TouchGesture>>,
 ) -> impl FnMut(Event<PointerEventData>) + 'static {
     let placed_labels = s.placed_labels.clone();
     let mut initial_center = s.initial_center;
@@ -218,6 +219,11 @@ pub fn build_on_global_pointer_up(
             return;
         };
         initial_center.set(None);
+        // A pinch: its fingers' releases are neither taps (opening whatever was under one)
+        // nor drag ends (jumping the map by the distance between the fingers).
+        if matches!(*event, PointerEventData::Touch(_)) && gesture.borrow().was_multi_touch() {
+            return;
+        }
 
         let pos = event.element_location();
         let start = *initial_touch.peek();
@@ -346,6 +352,194 @@ pub fn build_on_global_pointer_up(
                 }
             }
         }
+    }
+}
+
+/// Fingers on the map, for [`build_on_touch`].
+#[derive(Default)]
+pub struct TouchGesture {
+    /// Element-local position of each finger down, by id.
+    fingers: Vec<(u64, CursorPoint)>,
+    /// While two fingers are down: the view and fingers when the pinch started.
+    pinch: Option<Pinch>,
+    /// A pinch ended with a finger still down: that finger's next move re-anchors the pan
+    /// rather than jumping the map by the distance between the fingers.
+    reanchor: bool,
+    /// When the gesture's first finger went down.
+    started_at: Option<time::Instant>,
+    /// Last time two or more fingers were down.
+    multi_at: Option<time::Instant>,
+}
+
+impl TouchGesture {
+    /// Whether the current (or just finished) gesture had two fingers down at some point: its
+    /// release is then neither a tap nor a drag. Timestamps rather than a flag cleared on
+    /// release, as Freya dispatches `TouchEnd`'s derived `GlobalPointerUp` in no set order
+    /// relative to `TouchEnd` itself.
+    pub fn was_multi_touch(&self) -> bool {
+        matches!((self.started_at, self.multi_at), (Some(start), Some(multi)) if multi >= start)
+    }
+}
+
+struct Pinch {
+    center: CursorPoint,
+    zoom: f32,
+    distance: f64,
+    midpoint: CursorPoint,
+}
+
+fn distance(a: CursorPoint, b: CursorPoint) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+fn midpoint(a: CursorPoint, b: CursorPoint) -> CursorPoint {
+    CursorPoint::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+}
+
+/// Touch gestures: one finger pans, two pinch-zoom around their midpoint (and pan with it).
+/// Touch never produces `MouseMove`, so [`build_on_mouse_move`]'s drag never runs on a touch
+/// screen; a one-finger drag pans here instead, from the same `initial_touch`/`initial_center`
+/// anchor `on_pointer_down` sets, which `on_global_pointer_up` then finishes as usual.
+pub fn build_on_touch(
+    s: &MapInputState,
+    gesture: Rc<RefCell<TouchGesture>>,
+) -> impl FnMut(Event<TouchEventData>) + 'static {
+    let tile_cache = s.tile_cache.clone();
+    let zoom_dep_cache = s.zoom_dep_cache.clone();
+    let style = s.style.clone();
+    let platform = s.platform.clone();
+    let last_pan_update = s.last_pan_update.clone();
+    let mut center = s.center;
+    let mut zoom = s.zoom;
+    let mut initial_center = s.initial_center;
+    let mut initial_touch = s.initial_touch;
+    let viewport_size = s.viewport_size;
+
+    move |event: Event<TouchEventData>| {
+        let pos = event.element_location;
+        let id = event.finger_id;
+        let mut gesture = gesture.borrow_mut();
+
+        match event.phase {
+            TouchPhase::Started => {
+                gesture.fingers.retain(|(finger, _)| *finger != id);
+                if gesture.fingers.is_empty() {
+                    gesture.started_at = Some(time::Instant::now());
+                }
+                gesture.fingers.push((id, pos));
+                if gesture.fingers.len() >= 2 {
+                    gesture.multi_at = Some(time::Instant::now());
+                }
+                if let [(_, a), (_, b)] = gesture.fingers[..] {
+                    gesture.pinch = Some(Pinch {
+                        center: *center.peek(),
+                        zoom: *zoom.peek(),
+                        distance: distance(a, b).max(1.0),
+                        midpoint: midpoint(a, b),
+                    });
+                    // Not a pan nor a tap any more: `on_global_pointer_up` leaves it alone.
+                    initial_center.set(None);
+                }
+                return;
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if gesture.fingers.len() >= 2 {
+                    gesture.multi_at = Some(time::Instant::now());
+                }
+                gesture.fingers.retain(|(finger, _)| *finger != id);
+                if gesture.pinch.take().is_some() && !gesture.fingers.is_empty() {
+                    gesture.reanchor = true;
+                }
+                if gesture.fingers.is_empty() {
+                    gesture.reanchor = false;
+                }
+                return;
+            }
+            TouchPhase::Moved => {}
+        }
+
+        if let Some((_, at)) = gesture.fingers.iter_mut().find(|(finger, _)| *finger == id) {
+            *at = pos;
+        }
+
+        if gesture.reanchor && gesture.fingers.len() == 1 {
+            gesture.reanchor = false;
+            initial_touch.set(pos);
+            initial_center.set(Some(*center.peek()));
+            return;
+        }
+
+        // Same cap as mouse panning (see `build_on_mouse_move`): each kept move re-derives the
+        // view from the gesture's start, so dropping one loses nothing.
+        {
+            let mut last = last_pan_update.borrow_mut();
+            if last.elapsed() < FRAME_BUDGET {
+                return;
+            }
+            *last = time::Instant::now();
+        }
+
+        let max_real_zoom = style.borrow().max_real_zoom;
+        let (new_center, new_zoom) = match (&gesture.pinch, &gesture.fingers[..]) {
+            (Some(pinch), [(_, a), (_, b)]) => {
+                // `on_pointer_down` fires for the second finger too, possibly after
+                // `TouchPhase::Started` cleared this: a pinch must not end as a drag release.
+                if initial_center.peek().is_some() {
+                    initial_center.set(None);
+                }
+                let new_zoom = (pinch.zoom + (distance(*a, *b) / pinch.distance).log2() as f32)
+                    .clamp(
+                        style.borrow().min_zoom,
+                        super::util::viewport::max_zoom_ui(max_real_zoom),
+                    );
+                // Zoom around where the pinch started, then follow the midpoint's travel.
+                let zoomed = Viewport::zoom_around(
+                    pinch.center,
+                    pinch.zoom,
+                    new_zoom,
+                    pinch.midpoint,
+                    max_real_zoom,
+                );
+                let mid = midpoint(*a, *b);
+                let pan = Viewport::new(zoomed, new_zoom, max_real_zoom)
+                    .pixels_to_center_delta(mid.x - pinch.midpoint.x, mid.y - pinch.midpoint.y);
+                (
+                    CursorPoint::new(zoomed.x - pan.x, zoomed.y - pan.y),
+                    new_zoom,
+                )
+            }
+            (None, [_]) => {
+                let Some(initial) = *initial_center.peek() else {
+                    return;
+                };
+                let zoom_val = *zoom.peek();
+                let delta = pos - *initial_touch.peek();
+                let pan = Viewport::new(initial, zoom_val, max_real_zoom)
+                    .pixels_to_center_delta(delta.x, delta.y);
+                (
+                    CursorPoint::new(initial.x - pan.x, initial.y - pan.y),
+                    zoom_val,
+                )
+            }
+            _ => return,
+        };
+        drop(gesture);
+
+        center.set(new_center);
+        if *zoom.peek() != new_zoom {
+            zoom.set(new_zoom);
+        }
+        ensure_view(
+            new_center,
+            new_zoom,
+            viewport_size.peek().size,
+            &tile_cache,
+            &zoom_dep_cache,
+            &style.borrow(),
+            &platform,
+        );
+        // The paint closure only `peek`s the view (see `build_on_mouse_move`).
+        platform.send(UserEvent::RequestRedraw);
     }
 }
 

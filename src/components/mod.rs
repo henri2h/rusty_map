@@ -1,5 +1,6 @@
 pub mod charging;
 pub mod favorites;
+pub mod layers;
 pub mod map_view;
 pub mod place;
 pub mod search;

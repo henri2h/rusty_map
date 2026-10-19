@@ -4,7 +4,7 @@ use freya::prelude::*;
 use torin::geometry::{Area, CursorPoint};
 
 use crate::{
-    overlay::{MarkerSet, RouteOverlay},
+    overlay::{MarkerSet, RouteOverlay, UserLocation},
     style::{self, StyleSpec},
     util::{
         renderer::TILE_SIZE,
@@ -43,6 +43,8 @@ pub struct MapController {
     pub route_overlay: State<Option<Rc<RouteOverlay>>>,
     /// Tappable point markers drawn over the map (see `overlay::MarkerSet`).
     pub markers: State<Option<Rc<MarkerSet>>>,
+    /// The device's position (see [`UserLocation`]); `None` draws nothing.
+    pub user_location: State<Option<UserLocation>>,
 
     /// Mouse cursor over the map, e.g. a crosshair while the host waits for the user to pick a
     /// point. `None` keeps the default.
@@ -61,6 +63,7 @@ impl PartialEq for MapController {
             && self.transit == other.transit
             && self.route_overlay == other.route_overlay
             && self.markers == other.markers
+            && self.user_location == other.user_location
             && self.cursor == other.cursor
             && Rc::ptr_eq(&self.style, &other.style)
     }
@@ -80,6 +83,7 @@ impl MapController {
         let route_overlay = use_state::<Option<Rc<RouteOverlay>>>(|| None);
         let markers = use_state::<Option<Rc<MarkerSet>>>(|| None);
         let cursor = use_state::<Option<CursorIcon>>(|| None);
+        let user_location = use_state::<Option<UserLocation>>(|| None);
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
 
@@ -91,6 +95,7 @@ impl MapController {
             transit,
             route_overlay,
             markers,
+            user_location,
             cursor,
             style,
             platform,
@@ -103,6 +108,14 @@ impl MapController {
     pub fn set_route_overlay(&mut self, overlay: Option<RouteOverlay>) {
         self.route_overlay.set(overlay.map(Rc::new));
         self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Moves the device position dot and repaints.
+    pub fn set_user_location(&mut self, location: Option<UserLocation>) {
+        if *self.user_location.peek() != location {
+            self.user_location.set(location);
+            self.platform.send(UserEvent::RequestRedraw);
+        }
     }
 
     /// Replaces the drawn markers and repaints.
