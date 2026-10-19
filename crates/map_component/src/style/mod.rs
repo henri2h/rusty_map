@@ -201,7 +201,10 @@ pub enum ColorExpr {
     },
     /// The color written in a feature property (`"#ffbe00"`), e.g. a transit line's own
     /// `route_1_colour`; `default` when absent or unparsable.
-    Property { key: String, default: Color },
+    Property {
+        key: String,
+        default: Color,
+    },
 }
 
 #[derive(Clone)]

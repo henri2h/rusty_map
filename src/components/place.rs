@@ -30,6 +30,8 @@ pub struct EnrichedDetails {
     pub links: Vec<(String, String, String)>,
     /// A preview image from the place's Wikidata "image" claim (P18).
     pub image: Option<bytes::Bytes>,
+    /// A better title than the placeholder shown meanwhile (a dropped pin's street address).
+    pub title: Option<String>,
 }
 
 /// Identifies one enrichment fetch for [`EnrichCache`] purposes: a search result's stable OSM
@@ -43,6 +45,8 @@ pub enum EnrichKey {
     /// Only [`online_extras`], for a POI whose tags came from the tile itself.
     Extras(String, u64),
     Reverse(i64, i64, u32),
+    /// A dropped pin's address, at the same ~1 m quantization as [`format_coordinates`] shows.
+    Address(i64, i64),
 }
 
 impl EnrichKey {
@@ -125,6 +129,7 @@ impl PlaceController {
             place,
             platform,
             async move { enrich_tap(&cache, &tap).await },
+            None,
         );
     }
 
@@ -136,10 +141,68 @@ impl PlaceController {
         let place = place_from_search_result(result);
         let cache = self.enrich_cache.clone();
         let (osm_type, osm_id) = (result.osm_type.clone(), result.osm_id);
-        self.select_and_enrich(place, platform, async move {
-            let key = EnrichKey::Details(osm_type.clone(), osm_id);
-            enrich_cached(&cache, key, || search::fetch_osm_element(osm_type, osm_id)).await
-        });
+        self.select_and_enrich(
+            place,
+            platform,
+            async move {
+                let key = EnrichKey::Details(osm_type.clone(), osm_id);
+                enrich_cached(&cache, key, || search::fetch_osm_element(osm_type, osm_id)).await
+            },
+            None,
+        );
+    }
+
+    /// Shows a point picked on the map (no POI there) as a dropped pin with its coordinates,
+    /// then fills in the address at that point (see `search::fetch_address`). The drawer's title
+    /// is the search field's text: `query` gets the placeholder now and the street once known.
+    pub fn select_point(
+        &mut self,
+        lat: f64,
+        lon: f64,
+        mut query: State<String>,
+        platform: PlatformWindow,
+    ) {
+        query.set(DROPPED_PIN.to_string());
+        let place = SelectedPlace {
+            id: next_place_id(),
+            title: DROPPED_PIN.to_string(),
+            subtitle: String::new(),
+            details: vec![("Coordinates".to_string(), format_coordinates(lat, lon))],
+            raw_tags: Vec::new(),
+            links: Vec::new(),
+            marker_world: Some(lonlat_to_world(lon, lat)),
+            loading: true,
+            image: None,
+            transit_stop: None,
+            coords: Some((lat, lon)),
+        };
+        let cache = self.enrich_cache.clone();
+        let enrich = async move {
+            let key = EnrichKey::Address((lat * 1e5).round() as i64, (lon * 1e5).round() as i64);
+            if let Some(cached) = cache.borrow().get(&key).cloned() {
+                return cached;
+            }
+            match search::fetch_address(lat, lon).await {
+                Ok(address) => {
+                    let details = match address {
+                        Some(address) => EnrichedDetails {
+                            rows: vec![("Address".to_string(), address.line)],
+                            title: Some(address.title),
+                            ..Default::default()
+                        },
+                        // Open sea, mostly.
+                        None => EnrichedDetails::default(),
+                    };
+                    cache.borrow_mut().insert(key, details.clone());
+                    details
+                }
+                Err(err) => {
+                    log::warn!("[place] address lookup failed: {err:?}");
+                    EnrichedDetails::default()
+                }
+            }
+        };
+        self.select_and_enrich(place, platform, enrich, Some(query));
     }
 
     pub fn clear(&mut self) {
@@ -153,6 +216,7 @@ impl PlaceController {
         place: SelectedPlace,
         platform: PlatformWindow,
         enrich: impl Future<Output = EnrichedDetails> + 'static,
+        mut title_field: Option<State<String>>,
     ) {
         let id = place.id;
         self.selected_place.set(Some(place));
@@ -172,12 +236,18 @@ impl PlaceController {
             let Some(mut updated) = current else {
                 return;
             };
+            if let (Some(field), Some(title)) = (title_field.as_mut(), &enriched.title) {
+                field.set(title.clone());
+            }
             updated.apply(enriched);
             selected.set(Some(updated));
             platform.send(UserEvent::RequestRedraw);
         });
     }
 }
+
+/// Title of a point picked on the map until its address is known.
+const DROPPED_PIN: &str = "Dropped pin";
 
 /// Source of [`SelectedPlace::id`].
 static NEXT_PLACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -221,7 +291,11 @@ pub fn place_from_tap(tap: &TappedFeature) -> SelectedPlace {
 }
 
 fn place_from_tap_properties(tap: &TappedFeature) -> SelectedPlace {
-    let (details, raw_tags) = details_from_properties(&tap.properties);
+    let (mut details, raw_tags) = details_from_properties(&tap.properties);
+    details.push((
+        "Coordinates".to_string(),
+        format_coordinates(tap.lat, tap.lon),
+    ));
     SelectedPlace {
         id: next_place_id(),
         title: tap.title.clone(),
@@ -246,7 +320,7 @@ pub fn place_from_search_result(result: &SearchResult) -> SelectedPlace {
         subtitle: humanize(&result.category),
         details: vec![
             ("Address".to_string(), result.display_name.clone()),
-            ("Coordinates".to_string(), format!("{lat:.5}, {lon:.5}")),
+            ("Coordinates".to_string(), format_coordinates(lat, lon)),
         ],
         raw_tags: Vec::new(),
         links: Vec::new(),
@@ -258,6 +332,12 @@ pub fn place_from_search_result(result: &SearchResult) -> SelectedPlace {
             .then_some((lat, lon)),
         coords: Some((lat, lon)),
     }
+}
+
+/// `"48.85837, 2.29448"`: decimal degrees, latitude first, as GPS apps and map searches take
+/// them. Five decimals is ~1 m.
+pub fn format_coordinates(lat: f64, lon: f64) -> String {
+    format!("{lat:.5}, {lon:.5}")
 }
 
 /// OSM values (`highway=bus_stop`, `railway=station`, `public_transport=platform`, …) marking a
@@ -376,6 +456,9 @@ impl SelectedPlace {
         }
         if enriched.image.is_some() {
             self.image = enriched.image;
+        }
+        if let Some(title) = enriched.title {
+            self.title = title;
         }
         self.loading = false;
     }
@@ -698,6 +781,7 @@ pub fn local_details(tags: &[(String, String)]) -> EnrichedDetails {
         raw_tags,
         links,
         image: None,
+        title: None,
     }
 }
 
@@ -816,6 +900,7 @@ pub async fn online_extras(tags: &[(String, String)], fetch_edit_info: bool) -> 
         raw_tags: Vec::new(),
         links,
         image,
+        title: None,
     }
 }
 
@@ -879,6 +964,7 @@ mod tests {
             raw_tags: tags(&[("brand", "y")]),
             links: Vec::new(),
             image: None,
+            title: None,
         });
         assert_eq!(
             place.details,

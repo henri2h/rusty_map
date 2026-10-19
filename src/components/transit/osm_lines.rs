@@ -411,7 +411,9 @@ pub fn routes_from_tile(properties: &map_component::util::renderer::Properties) 
                 mode: route_mode(&text(format!("{prefix}mode")).unwrap_or_default()),
                 line: line.clone().or(name.clone()).unwrap_or_default(),
                 name: name.or(line).unwrap_or_default(),
-                color: text(format!("{prefix}colour")).as_deref().and_then(parse_hex_color),
+                color: text(format!("{prefix}colour"))
+                    .as_deref()
+                    .and_then(parse_hex_color),
                 network: text(format!("{prefix}network")),
                 operator: None,
                 from: None,

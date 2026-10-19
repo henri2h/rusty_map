@@ -705,6 +705,9 @@ fn detail_row(key: String, value: String) -> Element {
     if key == "Opening hours" {
         return opening_hours_row(value).into_element();
     }
+    if key == "Coordinates" {
+        return CoordinatesRow { value }.into_element();
+    }
 
     icon_row(
         &key,
@@ -721,6 +724,46 @@ fn detail_row(key: String, value: String) -> Element {
             .child(label().text(key.clone()).font_size(11.0).color(TEXT_FAINT)),
     )
     .into_element()
+}
+
+/// GPS coordinates; a click copies them to the clipboard.
+#[derive(PartialEq)]
+struct CoordinatesRow {
+    value: String,
+}
+
+impl Component for CoordinatesRow {
+    fn render(&self) -> impl IntoElement {
+        let mut copied = use_state(|| false);
+        let value = self.value.clone();
+        let hint = if *copied.read() {
+            "Coordinates · copied"
+        } else {
+            "Coordinates · click to copy"
+        };
+
+        icon_row(
+            "Coordinates",
+            rect()
+                .vertical()
+                .width(Size::fill())
+                .cursor(CursorIcon::Pointer)
+                .on_press(
+                    move |_: Event<PressEventData>| match Clipboard::set(value.clone()) {
+                        Ok(()) => copied.set(true),
+                        Err(err) => log::warn!("[place] copy failed: {err:?}"),
+                    },
+                )
+                .child(
+                    label()
+                        .text(self.value.clone())
+                        .font_size(14.0)
+                        .color(TEXT)
+                        .width(Size::fill()),
+                )
+                .child(label().text(hint).font_size(11.0).color(TEXT_FAINT)),
+        )
+    }
 }
 
 /// Renders a parsed `opening_hours` value (see `opening_hours::parse_opening_hours`) as a small

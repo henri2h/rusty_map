@@ -295,6 +295,82 @@ async fn fetch_reverse_io(
     Ok(tags)
 }
 
+/// The address at a point, from Nominatim's reverse geocoder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Address {
+    /// Short form for a title: `"12 Rue de Rivoli"`, or the street, or the nearest named place.
+    pub title: String,
+    /// The full address line Nominatim gives (`display_name`).
+    pub line: String,
+}
+
+/// Reverse-geocodes `lat`/`lon` to the nearest address (building level), or `None` where there
+/// is none (open sea).
+pub async fn fetch_address(lat: f64, lon: f64) -> Result<Option<Address>, FetchError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    background_runtime().spawn(async move {
+        let _ = tx.send(fetch_address_io(lat, lon).await);
+    });
+
+    rx.await.unwrap_or(Err(FetchError::TaskFailed))
+}
+
+async fn fetch_address_io(lat: f64, lon: f64) -> Result<Option<Address>, FetchError> {
+    log::trace!(
+        "[http] GET https://nominatim.openstreetmap.org/reverse lat={lat} lon={lon} (address)"
+    );
+    let response = client()
+        .get("https://nominatim.openstreetmap.org/reverse")
+        .query(&[
+            ("lat", lat.to_string()),
+            ("lon", lon.to_string()),
+            ("zoom", "18".to_string()),
+            ("format", "jsonv2".to_string()),
+            ("addressdetails", "1".to_string()),
+            // Addresses and streets, not the POI or landuse polygon the point happens to be in.
+            ("layer", "address".to_string()),
+        ])
+        .header(reqwest::header::USER_AGENT, "rusty_map/1.0")
+        .send()
+        .await
+        .map_err(FetchError::Network)?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FetchError::Http(status.as_u16()));
+    }
+    let text = response.text().await.map_err(FetchError::Network)?;
+    let parsed: Value = serde_json::from_str(&text).map_err(|_| FetchError::InvalidData)?;
+    Ok(address_from_reverse(&parsed))
+}
+
+/// Pulls an [`Address`] out of a `/reverse?format=jsonv2&addressdetails=1` response. A point
+/// with nothing nearby gets `{"error": "Unable to geocode"}`.
+fn address_from_reverse(parsed: &Value) -> Option<Address> {
+    let line = parsed["display_name"].as_str()?.to_string();
+    let part = |key: &str| {
+        parsed["address"][key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+    };
+    let street = ["road", "pedestrian", "footway", "path", "square", "place"]
+        .into_iter()
+        .find_map(part);
+    let title = match (part("house_number"), street) {
+        (Some(number), Some(street)) => format!("{number} {street}"),
+        (None, Some(street)) => street.to_string(),
+        _ => parsed["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .or_else(|| line.split(',').next())
+            .unwrap_or(&line)
+            .trim()
+            .to_string(),
+    };
+    Some(Address { title, line })
+}
+
 /// `/details`' `osmtype` param and `/reverse`'s own `osm_type` field disagree on shape (single
 /// letter `"W"` vs. full word `"way"`) — normalized here to the full word `osm.org/<kind>/<id>`
 /// URLs use, and stashed as a pseudo-tag (`_osm_type`/`_osm_id`, never real OSM keys) so
@@ -370,4 +446,40 @@ async fn fetch_osm_element_meta_io(
         return Ok(None);
     };
     Ok(Some((timestamp, user)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_title_prefers_number_and_street() {
+        let parsed: Value = serde_json::from_str(
+            r#"{"name": "", "display_name": "12, Rue de Rivoli, Paris, 75004, France",
+                "address": {"house_number": "12", "road": "Rue de Rivoli", "city": "Paris"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            address_from_reverse(&parsed),
+            Some(Address {
+                title: "12 Rue de Rivoli".to_string(),
+                line: "12, Rue de Rivoli, Paris, 75004, France".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn address_title_falls_back_to_first_part() {
+        let parsed: Value = serde_json::from_str(
+            r#"{"display_name": "Ormoy, Auxerre, Yonne, France", "address": {"village": "Ormoy"}}"#,
+        )
+        .unwrap();
+        assert_eq!(address_from_reverse(&parsed).unwrap().title, "Ormoy");
+    }
+
+    #[test]
+    fn nothing_to_geocode() {
+        let parsed: Value = serde_json::from_str(r#"{"error": "Unable to geocode"}"#).unwrap();
+        assert_eq!(address_from_reverse(&parsed), None);
+    }
 }

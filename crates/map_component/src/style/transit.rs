@@ -115,7 +115,12 @@ pub fn with_transit(base: &StyleSpec) -> StyleSpec {
     // show wherever a track carries no route. Other tile sources have no `transit_lines`, so these
     // match nothing there.
     let route_kinds = [
-        (&["train"][..], RAIL, 6.0, [(6.0, 1.2), (12.0, 2.4), (16.0, 4.0), (19.0, 6.5)]),
+        (
+            &["train"][..],
+            RAIL,
+            6.0,
+            [(6.0, 1.2), (12.0, 2.4), (16.0, 4.0), (19.0, 6.5)],
+        ),
         (
             &["subway"][..],
             SUBWAY,

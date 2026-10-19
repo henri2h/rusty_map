@@ -39,6 +39,9 @@ pub struct TappedFeature {
 pub struct MapTap {
     pub lon: f64,
     pub lat: f64,
+    /// A right-click: reported wherever it lands, labels and lines included, without
+    /// hit-testing — the app's "what is here" gesture.
+    pub secondary: bool,
 }
 
 /// A rail/transit line the user tapped, reported through
@@ -228,6 +231,21 @@ pub fn build_on_global_pointer_up(
             return;
         }
 
+        if event.button() == Some(MouseButton::Right) {
+            if let Some(handler) = &on_map_tapped {
+                let viewport =
+                    Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
+                let (world_x, world_y) = viewport.screen_to_world(pos.x as f32, pos.y as f32);
+                let (lon, lat) = world_to_lonlat(world_x, world_y);
+                handler.call(MapTap {
+                    lon,
+                    lat,
+                    secondary: true,
+                });
+            }
+            return;
+        }
+
         // Tap (press without drag): hit-test the labels/icons placed last frame and report the
         // topmost hit.
         {
@@ -249,7 +267,12 @@ pub fn build_on_global_pointer_up(
                     let (lon, lat) = world_to_lonlat(world_x, world_y);
                     let osm_identity = hit.feature_id.and_then(poi_lookup::decode_feature_id);
                     let details = osm_identity.as_ref().and_then(|identity| {
-                        find_poi_details(&tile_cache, &viewport, viewport_size.peek().size, identity)
+                        find_poi_details(
+                            &tile_cache,
+                            &viewport,
+                            viewport_size.peek().size,
+                            identity,
+                        )
                     });
                     if let Some(handler) = &on_place_tapped {
                         handler.call(TappedFeature {
@@ -296,10 +319,12 @@ pub fn build_on_global_pointer_up(
                         return;
                     }
 
-                    // Tapping empty map area dismisses whatever popup/pin/search dropdown was
-                    // showing.
                     if let Some(handler) = &on_map_tapped {
-                        handler.call(MapTap { lon, lat });
+                        handler.call(MapTap {
+                            lon,
+                            lat,
+                            secondary: false,
+                        });
                     }
                 }
             }
@@ -396,7 +421,12 @@ fn hit_transit_line(
     // Rank (no routes, bus, distance) — lower is better: a line naming its routes, then rail over
     // the bus lines running in the streets around it — then the line, its hit polyline, and
     // the tile's screen origin.
-    type Candidate<'a> = ((bool, bool, f32), &'a TransitLine, &'a Vec<(f32, f32)>, (f32, f32));
+    type Candidate<'a> = (
+        (bool, bool, f32),
+        &'a TransitLine,
+        &'a Vec<(f32, f32)>,
+        (f32, f32),
+    );
     let mut best: Option<Candidate> = None;
     for (tile, origin) in visible_tiles(&cache, viewport, viewport_size) {
         // The tap in this tile's normalized coordinates.
@@ -410,8 +440,7 @@ fn hit_transit_line(
             continue;
         }
         for line in &tile.transit_lines {
-            if is_bus(&line.properties)
-                && (zoom as f64) < crate::style::transit::BUS_LINES_MIN_ZOOM
+            if is_bus(&line.properties) && (zoom as f64) < crate::style::transit::BUS_LINES_MIN_ZOOM
             {
                 continue;
             }

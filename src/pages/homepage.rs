@@ -65,10 +65,14 @@ impl Component for HomePage {
                             places.select_tap(tap, platform.clone());
                         }
                     })
+                    // A click on empty map closes whatever the drawer shows, or, when it shows
+                    // nothing, drops a pin there with its coordinates and address. A right-click
+                    // always drops the pin.
                     .on_map_tapped({
                         let mut places = places.clone();
                         let mut search = search.clone();
                         let mut transit = transit.clone();
+                        let platform = controller.platform.clone();
                         move |tap: MapTap| {
                             if *transit.planner_open.peek() {
                                 if *transit.picking.peek() {
@@ -76,9 +80,21 @@ impl Component for HomePage {
                                 }
                                 return;
                             }
+                            let showing = places.selected_place.peek().is_some()
+                                || transit.view.peek().is_some()
+                                || !search.results.peek().is_empty();
                             transit.close_view();
                             search.reset(String::new());
-                            places.clear();
+                            if tap.secondary || !showing {
+                                places.select_point(
+                                    tap.lat,
+                                    tap.lon,
+                                    search.query,
+                                    platform.clone(),
+                                );
+                            } else {
+                                places.clear();
+                            }
                         }
                     })
                     .on_line_tapped({
