@@ -128,7 +128,12 @@ impl Component for HomePage {
             .child(TransitToggle {
                 transit: controller.transit,
             })
-            .child(FavoritesButton { favorites })
+            .child(FavoritesButton {
+                favorites,
+                places: places.clone(),
+                search: search.clone(),
+                transit: transit.clone(),
+            })
             .child(PickBanner {
                 transit: transit.clone(),
             })
@@ -290,11 +295,17 @@ impl Component for Attribution {
 #[derive(PartialEq)]
 struct FavoritesButton {
     favorites: Favorites,
+    places: PlaceController,
+    search: SearchController,
+    transit: TransitController,
 }
 
 impl Component for FavoritesButton {
     fn render(&self) -> impl IntoElement {
         let mut page_open = self.favorites.page_open;
+        let mut places = self.places.clone();
+        let mut search = self.search.clone();
+        let mut transit = self.transit.clone();
         rect()
             .position(Position::new_absolute().top(84.).right(12.))
             .layer(Layer::Overlay)
@@ -312,7 +323,15 @@ impl Component for FavoritesButton {
             .horizontal()
             .cross_align(Alignment::Center)
             .spacing(6.0)
-            .on_press(move |_: Event<PressEventData>| page_open.set(true))
+            // Closes the drawer first: a transit view open in it would keep the page hidden
+            // (see `FavoritesPage`), and the page replaces whatever was being looked at.
+            .on_press(move |_: Event<PressEventData>| {
+                transit.close_view();
+                transit.close_planner();
+                search.reset(String::new());
+                places.clear();
+                page_open.set(true);
+            })
             .child(
                 SvgViewer::new(lucide::star())
                     .width(Size::px(15.))
