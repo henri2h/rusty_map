@@ -4,6 +4,7 @@ use map_component::{MapComponent, MapController, MapTap, TappedFeature, TappedLi
 use super::favorites::FavoritesPage;
 
 use crate::components::{
+    charging::{ChargerLayer, Chargers},
     favorites::Favorites,
     map_view::use_remembered_view,
     place::PlaceController,
@@ -22,6 +23,8 @@ impl Component for HomePage {
         let transit = TransitController::new(controller.clone());
         let favorites = Favorites::new();
         use_provide_context(move || favorites);
+        let chargers = Chargers::new();
+        let chargers_on = *chargers.enabled.read();
         use_remembered_view(&controller);
         // Drawer sections (a departure row, a place's Directions button) reach it from deep in
         // the tree.
@@ -75,6 +78,29 @@ impl Component for HomePage {
                     // A click on empty map closes whatever the drawer shows, or, when it shows
                     // nothing, drops a pin there with its coordinates and address. A right-click
                     // always drops the pin.
+                    .on_marker_tapped({
+                        let mut places = places.clone();
+                        let mut search = search.clone();
+                        let mut transit = transit.clone();
+                        move |id: u64| {
+                            let Some(charger) = chargers.by_marker(id) else {
+                                return;
+                            };
+                            if *transit.planner_open.peek() {
+                                if *transit.picking.peek() {
+                                    transit.set_endpoint(Endpoint {
+                                        name: charger.name.clone(),
+                                        lat: charger.lat,
+                                        lon: charger.lon,
+                                    });
+                                }
+                                return;
+                            }
+                            transit.close_view();
+                            search.reset(charger.name.clone());
+                            places.select_charger(&charger);
+                        }
+                    })
                     .on_map_tapped({
                         let mut places = places.clone();
                         let mut search = search.clone();
@@ -128,6 +154,15 @@ impl Component for HomePage {
             .child(TransitToggle {
                 transit: controller.transit,
             })
+            .child(ChargersToggle { chargers })
+            .maybe_child(chargers_on.then(|| {
+                ChargerLayer {
+                    chargers,
+                    map: controller.clone(),
+                    places: places.clone(),
+                }
+                .into_element()
+            }))
             .child(FavoritesButton {
                 favorites,
                 places: places.clone(),
@@ -288,6 +323,52 @@ impl Component for Attribution {
                 "© OpenStreetMap contributors",
                 "https://www.openstreetmap.org/copyright",
             ))
+    }
+}
+
+/// Map control showing fast EV chargers, coloured by live availability (see `charging`).
+#[derive(PartialEq)]
+struct ChargersToggle {
+    chargers: Chargers,
+}
+
+impl Component for ChargersToggle {
+    fn render(&self) -> impl IntoElement {
+        let mut enabled = self.chargers.enabled;
+        let on = *enabled.read();
+        let (background, foreground) = if on {
+            (Color::from_rgb(24, 128, 56), Color::WHITE)
+        } else {
+            (
+                Color::from_argb(235, 255, 255, 255),
+                Color::from_rgb(60, 60, 60),
+            )
+        };
+        rect()
+            .position(Position::new_absolute().top(124.).right(12.))
+            .layer(Layer::Overlay)
+            .padding((6.0f32, 12.0f32))
+            .corner_radius(16.0f32)
+            .background(background)
+            .shadow((
+                0.0f32,
+                1.0f32,
+                4.0f32,
+                0.0f32,
+                Color::from_argb(60, 0, 0, 0),
+            ))
+            .cursor(CursorIcon::Pointer)
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .spacing(6.0)
+            .on_press(move |_: Event<PressEventData>| enabled.toggle())
+            .child(
+                SvgViewer::new(lucide::zap())
+                    .width(Size::px(15.))
+                    .height(Size::px(15.))
+                    .color(foreground),
+            )
+            .child(label().text("Chargers").font_size(13.0).color(foreground))
     }
 }
 

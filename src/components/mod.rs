@@ -1,3 +1,4 @@
+pub mod charging;
 pub mod favorites;
 pub mod map_view;
 pub mod place;

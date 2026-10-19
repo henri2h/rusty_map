@@ -4,7 +4,7 @@ use freya::prelude::*;
 use torin::geometry::{Area, CursorPoint};
 
 use crate::{
-    overlay::RouteOverlay,
+    overlay::{MarkerSet, RouteOverlay},
     style::{self, StyleSpec},
     util::{
         renderer::TILE_SIZE,
@@ -41,6 +41,8 @@ pub struct MapController {
 
     /// Trip/journey drawn over the map (see [`RouteOverlay`]); `None` draws nothing.
     pub route_overlay: State<Option<Rc<RouteOverlay>>>,
+    /// Tappable point markers drawn over the map (see `overlay::MarkerSet`).
+    pub markers: State<Option<Rc<MarkerSet>>>,
 
     /// Mouse cursor over the map, e.g. a crosshair while the host waits for the user to pick a
     /// point. `None` keeps the default.
@@ -58,6 +60,7 @@ impl PartialEq for MapController {
             && self.marker_world == other.marker_world
             && self.transit == other.transit
             && self.route_overlay == other.route_overlay
+            && self.markers == other.markers
             && self.cursor == other.cursor
             && Rc::ptr_eq(&self.style, &other.style)
     }
@@ -75,6 +78,7 @@ impl MapController {
         let marker_world = use_state::<Option<(f64, f64)>>(|| None);
         let transit = use_state(|| false);
         let route_overlay = use_state::<Option<Rc<RouteOverlay>>>(|| None);
+        let markers = use_state::<Option<Rc<MarkerSet>>>(|| None);
         let cursor = use_state::<Option<CursorIcon>>(|| None);
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
@@ -86,6 +90,7 @@ impl MapController {
             marker_world,
             transit,
             route_overlay,
+            markers,
             cursor,
             style,
             platform,
@@ -97,6 +102,12 @@ impl MapController {
     /// Replaces the drawn overlay and repaints.
     pub fn set_route_overlay(&mut self, overlay: Option<RouteOverlay>) {
         self.route_overlay.set(overlay.map(Rc::new));
+        self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Replaces the drawn markers and repaints.
+    pub fn set_markers(&mut self, markers: Option<MarkerSet>) {
+        self.markers.set(markers.map(Rc::new));
         self.platform.send(UserEvent::RequestRedraw);
     }
 

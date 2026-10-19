@@ -12,7 +12,7 @@ pub mod util;
 
 pub use map_controller::{Insets, MapController};
 pub use map_input::{MapTap, TappedFeature, TappedLine};
-pub use overlay::{OverlayPath, OverlayStop, RouteOverlay};
+pub use overlay::{MapMarker, MarkerSet, OverlayPath, OverlayStop, RouteOverlay};
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -45,6 +45,7 @@ pub struct MapComponent {
     on_place_tapped: Option<EventHandler<TappedFeature>>,
     /// Fired when a tap lands on empty map. Same not-compared reasoning as `on_place_tapped`.
     on_map_tapped: Option<EventHandler<MapTap>>,
+    on_marker_tapped: Option<EventHandler<u64>>,
     /// Fired when a tap hits a rail/transit line — only while the style keeps line geometry
     /// for picking (`StyleSpec::pick_transit_lines`, the transit overlay). Same not-compared
     /// reasoning as `on_place_tapped`.
@@ -69,12 +70,19 @@ impl MapComponent {
             controller,
             on_place_tapped: None,
             on_map_tapped: None,
+            on_marker_tapped: None,
             on_line_tapped: None,
         }
     }
 
     pub fn on_place_tapped(mut self, handler: impl FnMut(TappedFeature) + 'static) -> Self {
         self.on_place_tapped = Some(EventHandler::new(handler));
+        self
+    }
+
+    /// Fired with a [`MarkerSet`] marker's id when a tap lands on it (markers win over labels).
+    pub fn on_marker_tapped(mut self, handler: impl FnMut(u64) + 'static) -> Self {
+        self.on_marker_tapped = Some(EventHandler::new(handler));
         self
     }
 
@@ -114,6 +122,7 @@ impl Component for MapComponent {
         let mut viewport_size = self.controller.viewport_size;
         let marker_world_state = self.controller.marker_world;
         let route_overlay_state = self.controller.route_overlay;
+        let markers_state = self.controller.markers;
         let cursor = *self.controller.cursor.read();
         let style = self.controller.style.clone();
         let platform = self.controller.platform.clone();
@@ -235,6 +244,8 @@ impl Component for MapComponent {
             placed_labels: placed_labels.clone(),
             on_place_tapped: self.on_place_tapped.clone(),
             on_map_tapped: self.on_map_tapped.clone(),
+            markers: markers_state,
+            on_marker_tapped: self.on_marker_tapped.clone(),
             on_line_tapped: self.on_line_tapped.clone(),
         };
 
@@ -257,6 +268,8 @@ impl Component for MapComponent {
                     rect().background(RenderCallback::new(move |context| {
                         let marker_world = *marker_world_state.peek();
                         let route_overlay = route_overlay_state.peek().clone();
+                        let markers = markers_state.peek().clone();
+                        let style_now = style.borrow().clone();
 
                         paint_map(
                             context,
@@ -273,6 +286,22 @@ impl Component for MapComponent {
                             marker_world,
                             route_overlay.as_deref(),
                         );
+                        // Over everything, labels included: markers are what the user is
+                        // looking for when they're shown.
+                        if let Some(markers) = markers {
+                            let viewport = util::viewport::Viewport::new(
+                                *center.peek(),
+                                *zoom.peek(),
+                                style_now.max_real_zoom,
+                            );
+                            overlay::draw_markers(
+                                context.canvas,
+                                &markers,
+                                &viewport,
+                                *zoom.peek(),
+                                (context.size.width, context.size.height),
+                            );
+                        }
                     }))
                 };
 

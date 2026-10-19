@@ -60,6 +60,9 @@ pub struct Favorite {
     /// The OSM element (`"node"`, id), to show its full details again when selected.
     #[serde(default)]
     pub osm: Option<(String, u64)>,
+    /// A fast charger's station id: shows its live charge points again when selected.
+    #[serde(default)]
+    pub charger: Option<String>,
 }
 
 impl Favorite {
@@ -78,6 +81,7 @@ impl Favorite {
             lon,
             stop: place.transit_stop.is_some(),
             osm: place.links.iter().find_map(|(_, _, url)| osm_element(url)),
+            charger: place.charger.clone(),
         })
     }
 
@@ -241,6 +245,7 @@ mod tests {
             lon: 3.513,
             stop: true,
             osm: None,
+            charger: None,
         };
         assert!(favorite.same_as("Gare", 47.96098, 3.51305));
         assert!(!favorite.same_as("Gare", 47.97, 3.513));

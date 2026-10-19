@@ -29,6 +29,7 @@ use map_component::{
 };
 
 use crate::components::{
+    charging::ChargerLive,
     favorites::{Favorite, Favorites},
     place::{PlaceController, SelectedPlace, humanize},
     transit::{
@@ -589,6 +590,7 @@ fn place_details(
         image,
         transit_stop,
         coords,
+        charger,
         ..
     } = place;
 
@@ -728,6 +730,15 @@ fn place_details(
                     .into_element(),
             );
         }
+    }
+    if let Some(station_id) = charger {
+        body.push(
+            ChargerLive {
+                place_id: id,
+                station_id,
+            }
+            .into_element(),
+        );
     }
     if let Some((lat, lon)) = transit_stop {
         body.push(

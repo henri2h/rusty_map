@@ -87,6 +87,9 @@ pub struct MapInputState {
     /// Fired when a tap lands on empty map (no icon/label under it) — dismisses whatever's
     /// currently selected.
     pub on_map_tapped: Option<EventHandler<MapTap>>,
+    /// Host markers (see `overlay::MarkerSet`), hit-tested before labels.
+    pub markers: State<Option<Rc<crate::overlay::MarkerSet>>>,
+    pub on_marker_tapped: Option<EventHandler<u64>>,
     /// Fired when a tap hits a rail/transit line (only while the style keeps their geometry,
     /// see `StyleSpec::pick_transit_lines`).
     pub on_line_tapped: Option<EventHandler<TappedLine>>,
@@ -203,6 +206,8 @@ pub fn build_on_global_pointer_up(
     let on_place_tapped = s.on_place_tapped.clone();
     let on_map_tapped = s.on_map_tapped.clone();
     let on_line_tapped = s.on_line_tapped.clone();
+    let markers = s.markers;
+    let on_marker_tapped = s.on_marker_tapped.clone();
     let tile_cache = s.tile_cache.clone();
     let viewport_size = s.viewport_size;
     move |event: Event<PointerEventData>| {
@@ -244,6 +249,18 @@ pub fn build_on_global_pointer_up(
                 });
             }
             return;
+        }
+
+        // Markers sit on top of everything, so they're hit first.
+        if let (Some(handler), Some(set)) = (&on_marker_tapped, markers.peek().clone()) {
+            let viewport =
+                Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
+            if let Some(id) =
+                crate::overlay::marker_at(&set, &viewport, *zoom.peek(), pos.x as f32, pos.y as f32)
+            {
+                handler.call(id);
+                return;
+            }
         }
 
         // Tap (press without drag): hit-test the labels/icons placed last frame and report the

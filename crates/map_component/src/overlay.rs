@@ -136,3 +136,108 @@ pub(crate) fn draw_overlay(
         }
     }
 }
+
+/// Host-provided point markers drawn over everything (labels included) and tappable through
+/// `MapComponent::on_marker_tapped`, e.g. EV chargers coloured by live availability. Set through
+/// `MapController::markers`.
+#[derive(Clone, PartialEq, Default)]
+pub struct MarkerSet {
+    pub markers: Vec<MapMarker>,
+    /// The marker shown as selected (larger), by [`MapMarker::id`].
+    pub selected: Option<u64>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct MapMarker {
+    /// Reported back on tap.
+    pub id: u64,
+    /// World coordinates.
+    pub point: (f64, f64),
+    pub color: Color,
+}
+
+impl MapMarker {
+    pub fn from_lonlat(id: u64, lon: f64, lat: f64, color: Color) -> Self {
+        Self {
+            id,
+            point: lonlat_to_world(lon, lat),
+            color,
+        }
+    }
+}
+
+/// Marker radius in screen pixels at `zoom`: dots when zoomed out, badges with a bolt up close.
+fn marker_radius(zoom: f32, selected: bool) -> f32 {
+    let radius = if zoom < 8.0 {
+        3.0
+    } else if zoom < 11.0 {
+        5.0
+    } else {
+        9.0
+    };
+    if selected { radius + 3.0 } else { radius }
+}
+
+/// Zoom from which markers carry a bolt glyph.
+const MARKER_GLYPH_ZOOM: f32 = 11.0;
+
+/// The id of the marker under screen point (`x`, `y`), if any — topmost (last drawn) first.
+pub fn marker_at(set: &MarkerSet, viewport: &Viewport, zoom: f32, x: f32, y: f32) -> Option<u64> {
+    set.markers.iter().rev().find_map(|marker| {
+        let (cx, cy) = viewport.world_to_screen(marker.point.0, marker.point.1);
+        // A few pixels of slack: the small dots are hard to hit otherwise.
+        let reach = marker_radius(zoom, set.selected == Some(marker.id)) + 4.0;
+        ((cx - x).powi(2) + (cy - y).powi(2) <= reach * reach).then_some(marker.id)
+    })
+}
+
+pub(crate) fn draw_markers(
+    canvas: &freya::engine::prelude::Canvas,
+    set: &MarkerSet,
+    viewport: &Viewport,
+    zoom: f32,
+    size: (f32, f32),
+) {
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    let selected = set
+        .selected
+        .and_then(|id| set.markers.iter().find(|marker| marker.id == id));
+    // The selected marker last, so it sits on top.
+    let ordered = set
+        .markers
+        .iter()
+        .filter(|marker| Some(marker.id) != set.selected)
+        .chain(selected);
+    for marker in ordered {
+        let is_selected = set.selected == Some(marker.id);
+        let radius = marker_radius(zoom, is_selected);
+        let center = viewport.world_to_screen(marker.point.0, marker.point.1);
+        if center.0 < -radius
+            || center.1 < -radius
+            || center.0 > size.0 + radius
+            || center.1 > size.1 + radius
+        {
+            continue;
+        }
+        fill.set_color(SkColor::WHITE);
+        canvas.draw_circle(center, radius + if radius > 4.0 { 2.0 } else { 1.0 }, &fill);
+        fill.set_color(SkColor::from(marker.color));
+        canvas.draw_circle(center, radius, &fill);
+        if zoom >= MARKER_GLYPH_ZOOM {
+            // A lightning bolt, in a unit box scaled to the badge.
+            let s = radius * 0.62;
+            let (cx, cy) = center;
+            let mut bolt = PathBuilder::new();
+            bolt.move_to((cx + 0.15 * s, cy - 1.0 * s));
+            bolt.line_to((cx - 0.55 * s, cy + 0.12 * s));
+            bolt.line_to((cx - 0.02 * s, cy + 0.12 * s));
+            bolt.line_to((cx - 0.15 * s, cy + 1.0 * s));
+            bolt.line_to((cx + 0.55 * s, cy - 0.12 * s));
+            bolt.line_to((cx + 0.02 * s, cy - 0.12 * s));
+            bolt.close();
+            fill.set_color(SkColor::WHITE);
+            canvas.draw_path(&bolt.detach(), &fill);
+        }
+    }
+}

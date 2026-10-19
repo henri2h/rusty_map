@@ -15,6 +15,7 @@ use map_component::{
 };
 
 use crate::components::{
+    charging::api::Charger,
     favorites::Favorite,
     search::util::search::{self, SearchResult},
 };
@@ -178,6 +179,7 @@ impl PlaceController {
             image: None,
             transit_stop: None,
             coords: Some((lat, lon)),
+            charger: None,
         };
         let cache = self.enrich_cache.clone();
         let enrich = async move {
@@ -223,6 +225,7 @@ impl PlaceController {
             image: None,
             transit_stop: favorite.stop.then_some((lat, lon)),
             coords: Some((lat, lon)),
+            charger: favorite.charger.clone(),
         };
         let Some((osm_type, osm_id)) = favorite.osm.clone() else {
             self.selected_place.set(Some(place));
@@ -238,6 +241,52 @@ impl PlaceController {
             },
             None,
         );
+    }
+
+    /// Shows a fast charger tapped on the map, from the charger list itself (no OSM lookup);
+    /// its live charge points load in the drawer.
+    pub fn select_charger(&mut self, charger: &Charger) {
+        let mut details = Vec::new();
+        if let Some(operator) = &charger.operator {
+            details.push(("Operator".to_string(), operator.clone()));
+        }
+        let plugs = if charger.plugs.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", charger.plugs.join(", "))
+        };
+        details.push((
+            "Charge points".to_string(),
+            format!("{}{plugs}", charger.points),
+        ));
+        if let Some(access) = &charger.access {
+            details.push(("Access".to_string(), access.clone()));
+        }
+        if charger.card_payment {
+            details.push(("Payment".to_string(), "Bank card accepted".to_string()));
+        }
+        if let Some(price) = &charger.price {
+            details.push(("Price".to_string(), price.clone()));
+        }
+        details.push((
+            "Coordinates".to_string(),
+            format_coordinates(charger.lat, charger.lon),
+        ));
+        self.selected_place.set(Some(SelectedPlace {
+            id: next_place_id(),
+            title: charger.name.clone(),
+            subtitle: format!("Fast charger · up to {:.0} kW", charger.max_kw),
+            details,
+            raw_tags: Vec::new(),
+            links: Vec::new(),
+            // The charger's own marker is drawn, highlighted.
+            marker_world: None,
+            loading: false,
+            image: None,
+            transit_stop: None,
+            coords: Some((charger.lat, charger.lon)),
+            charger: Some(charger.id.clone()),
+        }));
     }
 
     pub fn clear(&mut self) {
@@ -343,6 +392,7 @@ fn place_from_tap_properties(tap: &TappedFeature) -> SelectedPlace {
         image: None,
         transit_stop: is_transit_poi(&tap.properties).then_some((tap.lat, tap.lon)),
         coords: Some((tap.lat, tap.lon)),
+        charger: None,
     }
 }
 
@@ -366,6 +416,7 @@ pub fn place_from_search_result(result: &SearchResult) -> SelectedPlace {
             .contains(&result.category.as_str())
             .then_some((lat, lon)),
         coords: Some((lat, lon)),
+        charger: None,
     }
 }
 
@@ -475,6 +526,9 @@ pub struct SelectedPlace {
     pub transit_stop: Option<(f64, f64)>,
     /// `(lat, lon)`, e.g. to plan a journey there.
     pub coords: Option<(f64, f64)>,
+    /// A fast charger's `id_station_itinerance`: the drawer shows its live charge points
+    /// (`charging::ChargerLive`).
+    pub charger: Option<String>,
 }
 
 impl SelectedPlace {
@@ -993,6 +1047,7 @@ mod tests {
             image: None,
             transit_stop: None,
             coords: None,
+            charger: None,
         };
         place.apply(EnrichedDetails {
             rows: tags(&[("Opening hours", "Mo-Fr 09:00-18:00"), ("Phone", "1")]),
