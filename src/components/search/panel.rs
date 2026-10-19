@@ -29,6 +29,7 @@ use map_component::{
 };
 
 use crate::components::{
+    favorites::{Favorite, Favorites},
     place::{PlaceController, SelectedPlace, humanize},
     transit::{Departures, Endpoint, Planner, TrackView, TransitController, TransitView, TripView},
 };
@@ -60,6 +61,7 @@ const TEXT_FAINT: Color = Color::from_rgb(140, 144, 150);
 const ACCENT: Color = Color::from_rgb(26, 115, 232);
 const DIVIDER: Color = Color::from_rgb(232, 234, 237);
 const SURFACE_ALT: Color = Color::from_rgb(244, 246, 248);
+const STAR: Color = Color::from_rgb(242, 153, 0);
 
 #[derive(PartialEq)]
 pub struct SearchPanel {
@@ -88,6 +90,7 @@ impl SearchPanel {
 impl Component for SearchPanel {
     fn render(&self) -> impl IntoElement {
         let (map, places, search, transit) = (&self.map, &self.places, &self.search, &self.transit);
+        let favorites = use_consume::<Favorites>();
 
         let on_validate = build_on_search_input(map, places, search);
         let has_query = !search.query.read().is_empty();
@@ -175,11 +178,16 @@ impl Component for SearchPanel {
             vec![Planner {}.into_element()]
         } else {
             let mut content = vec![input.into_element()];
+            let idle = !drawer_open && dropdown.is_none() && !has_query;
+            let saved = favorites.list.read().clone();
+            if idle && !saved.is_empty() {
+                content.push(favorite_chips(saved, map, places, search));
+            }
             content.extend(dropdown);
             if let Some(view) = view {
                 content.push(transit_view(view, transit.clone()));
             } else if let Some(place) = place {
-                content.push(place_details(place, transit.clone()).into_element());
+                content.push(place_details(place, transit.clone(), favorites).into_element());
             }
             content
         };
@@ -348,11 +356,7 @@ fn result_row(
         .collect::<Vec<_>>()
         .join(" · ");
 
-    let mut center = map.center;
-    let mut zoom = map.zoom;
-    let viewport_size = map.viewport_size;
-    let max_real_zoom = map.style.borrow().max_real_zoom;
-    let platform = map.platform.clone();
+    let map = map.clone();
     let mut places = places.clone();
     let mut search = search.clone();
 
@@ -360,27 +364,9 @@ fn result_row(
         .flat()
         .width(Size::fill())
         .on_press(move |_: Event<PressEventData>| {
-            let target_zoom = RESULT_ZOOM.min(max_zoom_ui(max_real_zoom));
-            // `lonlat_to_center` alone would put the target at the viewport's top-left corner
-            // (that's what `center` actually anchors — see `Viewport`'s own doc comment), not
-            // its visual middle. Shift by half the viewport in pixels, converted through the
-            // same `pixels_to_center_delta` panning uses, so a search result actually lands
-            // where the user is looking.
-            let area = viewport_size.peek().size;
-            let half_offset = Viewport::new(CursorPoint::zero(), target_zoom, max_real_zoom)
-                .pixels_to_center_delta(area.width as f64 / 2.0, area.height as f64 / 2.0);
-            let raw_center = lonlat_to_center(result.lon, result.lat);
-            center.set(CursorPoint::new(
-                raw_center.x - half_offset.x,
-                raw_center.y - half_offset.y,
-            ));
-            zoom.set(target_zoom);
-
+            fly_to(&map, result.lat, result.lon);
             search.reset(result.title().to_string());
-            places.select_search_result(&result, platform.clone());
-            // `zoom` may end up unchanged (e.g. picking another result while already at the
-            // cap), so the canvas's `.key()` alone can't be relied on to force a repaint.
-            platform.send(UserEvent::RequestRedraw);
+            places.select_search_result(&result, map.platform.clone());
         })
         .child(
             rect()
@@ -415,6 +401,98 @@ fn result_row(
                         }),
                 ),
         )
+}
+
+/// Centres the map on (`lat`, `lon`) at street level (capped by the style's max zoom), in the
+/// part of the map the drawer leaves visible — the callers all open the drawer.
+pub fn fly_to(map: &MapController, lat: f64, lon: f64) {
+    let (mut center, mut zoom) = (map.center, map.zoom);
+    let max_real_zoom = map.style.borrow().max_real_zoom;
+    let target_zoom = RESULT_ZOOM.min(max_zoom_ui(max_real_zoom));
+    // `lonlat_to_center` alone would put the target at the viewport's top-left corner (that's
+    // what `center` actually anchors — see `Viewport`'s own doc comment), not its visual
+    // middle. Shift by the free area's middle in pixels, converted through the same
+    // `pixels_to_center_delta` panning uses, so the target lands where the user is looking.
+    let area = map.viewport_size.peek().size;
+    let free_width = (area.width - PANEL_WIDTH).max(0.0);
+    let half_offset = Viewport::new(CursorPoint::zero(), target_zoom, max_real_zoom)
+        .pixels_to_center_delta(
+            (area.width - free_width / 2.0) as f64,
+            area.height as f64 / 2.0,
+        );
+    let raw_center = lonlat_to_center(lon, lat);
+    center.set(CursorPoint::new(
+        raw_center.x - half_offset.x,
+        raw_center.y - half_offset.y,
+    ));
+    zoom.set(target_zoom);
+    // `zoom` may end up unchanged (e.g. picking another result while already at the cap), so
+    // the canvas's `.key()` alone can't be relied on to force a repaint.
+    map.platform.send(UserEvent::RequestRedraw);
+}
+
+/// Saved places under the idle search pill: one tap shows the place.
+fn favorite_chips(
+    favorites: Vec<Favorite>,
+    map: &MapController,
+    places: &PlaceController,
+    search: &SearchController,
+) -> Element {
+    let chips = favorites.into_iter().map(|favorite| {
+        let map = map.clone();
+        let mut places = places.clone();
+        let mut search = search.clone();
+        let name = favorite.name.clone();
+        favorite_chip(&name, favorite.stop, move || {
+            fly_to(&map, favorite.lat, favorite.lon);
+            search.reset(favorite.name.clone());
+            places.select_favorite(&favorite, map.platform.clone());
+        })
+    });
+    ScrollView::new()
+        .direction(Direction::horizontal())
+        .width(Size::fill())
+        .height(Size::auto())
+        .show_scrollbar(false)
+        .child(
+            rect()
+                .horizontal()
+                .spacing(6.0)
+                .padding((6.0f32, 4.0f32, 2.0f32, 4.0f32))
+                .children(chips),
+        )
+        .into_element()
+}
+
+/// A saved place as a small rounded button: star (or a train for stops) plus its name.
+pub fn favorite_chip(name: &str, stop: bool, mut on_press: impl FnMut() + 'static) -> Element {
+    rect()
+        .horizontal()
+        .cross_align(Alignment::Center)
+        .spacing(5.0)
+        .padding((4.0f32, 10.0f32))
+        .corner_radius(14.0f32)
+        .background(SURFACE_ALT)
+        .cursor(CursorIcon::Pointer)
+        .on_press(move |_: Event<PressEventData>| on_press())
+        .child(
+            SvgViewer::new(if stop {
+                lucide::train_front()
+            } else {
+                lucide::star()
+            })
+            .width(Size::px(13.0))
+            .height(Size::px(13.0))
+            .color(STAR),
+        )
+        .child(
+            label()
+                .text(name.to_string())
+                .font_size(12.0)
+                .color(TEXT)
+                .max_lines(1),
+        )
+        .into_element()
 }
 
 fn build_on_search_input(
@@ -472,7 +550,15 @@ fn build_on_search_input(
 /// its own ✕ closes the drawer, so there's no second title/close header here. One continuous
 /// `ScrollView` for everything (not several small independent ones), so content past the
 /// window's bottom edge is actually reachable instead of silently clipped.
-fn place_details(place: SelectedPlace, transit: TransitController) -> impl IntoElement {
+fn place_details(
+    place: SelectedPlace,
+    transit: TransitController,
+    mut favorites: Favorites,
+) -> impl IntoElement {
+    let favorite = Favorite::from_place(&place);
+    let saved = favorite
+        .as_ref()
+        .is_some_and(|favorite| favorites.contains(&favorite.name, favorite.lat, favorite.lon));
     let SelectedPlace {
         id,
         title,
@@ -536,30 +622,65 @@ fn place_details(place: SelectedPlace, transit: TransitController) -> impl IntoE
     if let Some((lat, lon)) = coords {
         let mut transit = transit.clone();
         let name = title.clone();
-        body.push(
+        let directions = Button::new()
+            .filled()
+            .width(Size::flex(1.0))
+            .on_press(move |_: Event<PressEventData>| {
+                transit.open_planner(Some(Endpoint {
+                    name: name.clone(),
+                    lat,
+                    lon,
+                }))
+            })
+            .child(
+                rect()
+                    .horizontal()
+                    .cross_align(Alignment::Center)
+                    .spacing(6.0)
+                    .child(icon(lucide::route(), Color::WHITE))
+                    .child(
+                        label()
+                            .text("Directions")
+                            .font_size(13.0)
+                            .color(Color::WHITE),
+                    ),
+            );
+        // Save / unsave this place.
+        let star = favorite.map(|favorite| {
             Button::new()
-                .filled()
-                .width(Size::fill())
-                .on_press(move |_: Event<PressEventData>| {
-                    transit.open_planner(Some(Endpoint {
-                        name: name.clone(),
-                        lat,
-                        lon,
-                    }))
-                })
+                .flat()
+                .on_press(move |_: Event<PressEventData>| favorites.toggle(favorite.clone()))
                 .child(
                     rect()
                         .horizontal()
                         .cross_align(Alignment::Center)
                         .spacing(6.0)
-                        .child(icon(lucide::route(), Color::WHITE))
+                        .child(icon(
+                            if saved {
+                                lucide::star_off()
+                            } else {
+                                lucide::star()
+                            },
+                            STAR,
+                        ))
                         .child(
                             label()
-                                .text("Directions")
+                                .text(if saved { "Saved" } else { "Save" })
                                 .font_size(13.0)
-                                .color(Color::WHITE),
+                                .color(TEXT),
                         ),
                 )
+                .into_element()
+        });
+        body.push(
+            rect()
+                .horizontal()
+                .content(Content::flex())
+                .width(Size::fill())
+                .cross_align(Alignment::Center)
+                .spacing(8.0)
+                .child(directions)
+                .maybe_child(star)
                 .into_element(),
         );
         body.push(rect().height(Size::px(8.0)).into_element());

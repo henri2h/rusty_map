@@ -1,7 +1,11 @@
 use freya::{icons::lucide, prelude::*};
 use map_component::{MapComponent, MapController, MapTap, TappedFeature, TappedLine};
 
+use super::favorites::FavoritesPage;
+
 use crate::components::{
+    favorites::Favorites,
+    map_view::use_remembered_view,
     place::PlaceController,
     search::{SearchController, SearchPanel},
     transit::{Endpoint, Field, TransitController},
@@ -16,6 +20,9 @@ impl Component for HomePage {
         let places = PlaceController::new();
         let search = SearchController::new();
         let transit = TransitController::new(controller.clone());
+        let favorites = Favorites::new();
+        use_provide_context(move || favorites);
+        use_remembered_view(&controller);
         // Drawer sections (a departure row, a place's Directions button) reach it from deep in
         // the tree.
         use_provide_context({
@@ -121,10 +128,21 @@ impl Component for HomePage {
             .child(TransitToggle {
                 transit: controller.transit,
             })
+            .child(FavoritesButton { favorites })
             .child(PickBanner {
                 transit: transit.clone(),
             })
-            .child(SearchPanel::new(controller, places, search, transit))
+            .child(SearchPanel::new(
+                controller.clone(),
+                places.clone(),
+                search.clone(),
+                transit,
+            ))
+            .child(FavoritesPage {
+                map: controller,
+                places,
+                search,
+            })
     }
 }
 
@@ -265,6 +283,48 @@ impl Component for Attribution {
                 "© OpenStreetMap contributors",
                 "https://www.openstreetmap.org/copyright",
             ))
+    }
+}
+
+/// Map control opening the favorites page.
+#[derive(PartialEq)]
+struct FavoritesButton {
+    favorites: Favorites,
+}
+
+impl Component for FavoritesButton {
+    fn render(&self) -> impl IntoElement {
+        let mut page_open = self.favorites.page_open;
+        rect()
+            .position(Position::new_absolute().top(84.).right(12.))
+            .layer(Layer::Overlay)
+            .padding((6.0f32, 12.0f32))
+            .corner_radius(16.0f32)
+            .background(Color::from_argb(235, 255, 255, 255))
+            .shadow((
+                0.0f32,
+                1.0f32,
+                4.0f32,
+                0.0f32,
+                Color::from_argb(60, 0, 0, 0),
+            ))
+            .cursor(CursorIcon::Pointer)
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .spacing(6.0)
+            .on_press(move |_: Event<PressEventData>| page_open.set(true))
+            .child(
+                SvgViewer::new(lucide::star())
+                    .width(Size::px(15.))
+                    .height(Size::px(15.))
+                    .color(Color::from_rgb(242, 153, 0)),
+            )
+            .child(
+                label()
+                    .text("Favorites")
+                    .font_size(13.0)
+                    .color(Color::from_rgb(60, 60, 60)),
+            )
     }
 }
 

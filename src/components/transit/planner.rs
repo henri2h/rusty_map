@@ -14,7 +14,9 @@ use map_component::{
 };
 
 use crate::components::{
+    favorites::Favorites,
     place::humanize,
+    search::favorite_chip,
     search::util::search::{self, SearchResult},
 };
 
@@ -70,6 +72,7 @@ impl Component for Planner {
         let to = transit.to.read().clone();
         let active = *transit.active_field.read();
         let picking = *transit.picking.read();
+        let shortcuts = favorite_shortcuts(&transit);
         let when_state = transit.when;
         let when = *when_state.read();
 
@@ -157,6 +160,7 @@ impl Component for Planner {
                             .child(icon(lucide::arrow_up_down(), TEXT_MUTED, 18.0)),
                     ),
             )
+            .maybe_child(shortcuts)
             .maybe_child(hint.map(|hint| {
                 label()
                     .text(hint)
@@ -179,6 +183,37 @@ impl Component for Planner {
                 _ => None,
             })
     }
+}
+
+/// Saved places as chips: one tap fills the active field (start or destination).
+fn favorite_shortcuts(transit: &TransitController) -> Option<Element> {
+    let favorites = try_consume_context::<Favorites>()?;
+    let list = favorites.list.read().clone();
+    if list.is_empty() {
+        return None;
+    }
+    let chips = list.into_iter().map(|favorite| {
+        let mut transit = transit.clone();
+        let name = favorite.name.clone();
+        favorite_chip(&name, favorite.stop, move || {
+            transit.stop_picking();
+            transit.set_endpoint(Endpoint {
+                name: favorite.name.clone(),
+                lat: favorite.lat,
+                lon: favorite.lon,
+            });
+        })
+    });
+    Some(
+        ScrollView::new()
+            .direction(Direction::horizontal())
+            .width(Size::fill())
+            .height(Size::auto())
+            .show_scrollbar(false)
+            .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
+            .child(rect().horizontal().spacing(6.0).children(chips))
+            .into_element(),
+    )
 }
 
 /// One endpoint input: shows the chosen place's name, searches as the user types, and offers

@@ -14,7 +14,10 @@ use map_component::{
     util::{renderer::Properties, tiles::FetchError, viewport::lonlat_to_world},
 };
 
-use crate::components::search::util::search::{self, SearchResult};
+use crate::components::{
+    favorites::Favorite,
+    search::util::search::{self, SearchResult},
+};
 
 /// `(mapped rows, unmapped tags)` — see [`details_from_properties`]/[`details_from_tags`].
 type DetailRows = (Vec<(String, String)>, Vec<(String, String)>);
@@ -203,6 +206,38 @@ impl PlaceController {
             }
         };
         self.select_and_enrich(place, platform, enrich, Some(query));
+    }
+
+    /// Shows a saved favorite, pinned, then its full OSM details when it is an OSM element.
+    pub fn select_favorite(&mut self, favorite: &Favorite, platform: PlatformWindow) {
+        let (lat, lon) = (favorite.lat, favorite.lon);
+        let place = SelectedPlace {
+            id: next_place_id(),
+            title: favorite.name.clone(),
+            subtitle: favorite.kind.clone(),
+            details: vec![("Coordinates".to_string(), format_coordinates(lat, lon))],
+            raw_tags: Vec::new(),
+            links: Vec::new(),
+            marker_world: Some(lonlat_to_world(lon, lat)),
+            loading: favorite.osm.is_some(),
+            image: None,
+            transit_stop: favorite.stop.then_some((lat, lon)),
+            coords: Some((lat, lon)),
+        };
+        let Some((osm_type, osm_id)) = favorite.osm.clone() else {
+            self.selected_place.set(Some(place));
+            return;
+        };
+        let cache = self.enrich_cache.clone();
+        self.select_and_enrich(
+            place,
+            platform,
+            async move {
+                let key = EnrichKey::Details(osm_type.clone(), osm_id);
+                enrich_cached(&cache, key, || search::fetch_osm_element(osm_type, osm_id)).await
+            },
+            None,
+        );
     }
 
     pub fn clear(&mut self) {
