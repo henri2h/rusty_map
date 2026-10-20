@@ -179,6 +179,7 @@ pub fn with_transit(base: &StyleSpec) -> StyleSpec {
     StyleSpec {
         layers,
         tile_url_template: base.tile_url_template.clone(),
+        fallback_tile_url_template: base.fallback_tile_url_template.clone(),
         sprite_url: base.sprite_url.clone(),
         min_zoom: base.min_zoom,
         max_real_zoom: base.max_real_zoom,

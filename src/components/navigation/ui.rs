@@ -166,7 +166,7 @@ impl Component for WalkRoute {
                 rect()
                     .cursor(CursorIcon::Pointer)
                     .margin((8.0f32, 0.0f32, 16.0f32, 0.0f32))
-                    .on_press(move |_: Event<PressEventData>| Platform::get().open_url(url))
+                    .on_press(move |_: Event<PressEventData>| crate::mobile::open_url(url))
                     .child(label().text(text).font_size(text_size(11.0)).color(LINK))
             })
     }

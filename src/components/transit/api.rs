@@ -87,18 +87,21 @@ pub struct StopDepartures {
 }
 
 /// Finds the stop at (`lat`, `lon`) — preferring one named like `name` among the nearby
-/// candidates — and fetches its next departures. `Ok(None)`: Transitous knows no stop there.
+/// candidates, and numbered `platform` (OSM `local_ref`/`ref`, e.g. `"4"` or `"Quai 4"`) when
+/// several share that name — and fetches its next departures. `Ok(None)`: Transitous knows no
+/// stop there.
 pub async fn departures_near(
     lat: f64,
     lon: f64,
     name: String,
+    platform: Option<String>,
     when: When,
     count: u32,
 ) -> Result<Option<StopDepartures>, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     background_runtime().spawn(async move {
         let result = async {
-            let Some(stop) = find_stop(lat, lon, &name).await? else {
+            let Some(stop) = find_stop(lat, lon, &name, platform.as_deref()).await? else {
                 return Ok(None);
             };
             let departures = fetch_departures(&stop.id, when, count).await?;
@@ -142,35 +145,153 @@ struct GeocodeMatch {
     lon: f64,
 }
 
-async fn find_stop(lat: f64, lon: f64, name: &str) -> Result<Option<Stop>, FetchError> {
-    let matches: Vec<GeocodeMatch> = get_json(
-        "/v1/reverse-geocode",
-        &[
-            ("place", format!("{lat},{lon}")),
-            ("type", "STOP".to_string()),
-        ],
-    )
-    .await?;
-    Ok(pick_stop(matches, lat, lon, name))
+/// One stop of `/v1/map/stops`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MapStop {
+    stop_id: String,
+    name: String,
+    lat: f64,
+    lon: f64,
 }
 
-/// Nearby candidates come back nearest first; a same-named one wins over a nearer one with
-/// another name (a tapped POI's position is approximate, and bus stops cluster at junctions).
-fn pick_stop(matches: Vec<GeocodeMatch>, lat: f64, lon: f64, name: &str) -> Option<Stop> {
-    let wanted = normalize_name(name);
+/// Every stop within [`MAX_STOP_DISTANCE_M`] (MOTIS' `map/stops`, which lists all of them — a bus
+/// station's dozen platforms included — where `reverse-geocode` only gives the nearest few),
+/// falling back to `reverse-geocode` when that fails.
+async fn find_stop(
+    lat: f64,
+    lon: f64,
+    name: &str,
+    platform: Option<&str>,
+) -> Result<Option<Stop>, FetchError> {
+    let dlat = MAX_STOP_DISTANCE_M / 111_320.0;
+    let dlon = dlat / lat.to_radians().cos().max(0.01);
+    let listed: Result<Vec<MapStop>, FetchError> = get_json(
+        "/v1/map/stops",
+        &[
+            ("min", format!("{},{}", lat - dlat, lon - dlon)),
+            ("max", format!("{},{}", lat + dlat, lon + dlon)),
+        ],
+    )
+    .await;
+    let mut matches: Vec<GeocodeMatch> = match listed {
+        Ok(stops) if !stops.is_empty() => stops
+            .into_iter()
+            .map(|stop| GeocodeMatch {
+                id: stop.stop_id,
+                name: stop.name,
+                lat: stop.lat,
+                lon: stop.lon,
+            })
+            .collect(),
+        listed => {
+            if let Err(err) = listed {
+                log::debug!("[transit] map/stops failed ({err:?}), using reverse-geocode");
+            }
+            get_json(
+                "/v1/reverse-geocode",
+                &[
+                    ("place", format!("{lat},{lon}")),
+                    ("type", "STOP".to_string()),
+                ],
+            )
+            .await?
+        }
+    };
+    matches.sort_by(|a, b| {
+        distance_m(lat, lon, a.lat, a.lon).total_cmp(&distance_m(lat, lon, b.lat, b.lon))
+    });
+    Ok(pick_stop(matches, lat, lon, name, platform))
+}
+
+/// How well a stop's name matches the tapped one: 3 the same, 2 one contained in the other once
+/// spaces are dropped (`"Gareroutière"` in `"Aix-en-Provence - Gare Routière"`), 1 every word of
+/// one in the other (`"AIX GARE ROUTIERE"`), 0 unrelated. Trailing platform numbers
+/// (`"Gare Routière Quai 04"`) are left out first. Feeds name the same stop very differently.
+fn name_score(wanted: &str, candidate: &str) -> u8 {
+    let (wanted, candidate) = (station_name(wanted), station_name(candidate));
+    if wanted.is_empty() || candidate.is_empty() {
+        return 0;
+    }
+    if wanted == candidate {
+        return 3;
+    }
+    let squash = |name: &str| name.replace(' ', "");
+    let (w, c) = (squash(&wanted), squash(&candidate));
+    if w.contains(&c) || c.contains(&w) {
+        return 2;
+    }
+    let words = |name: &str| -> Vec<String> {
+        name.split(' ')
+            .filter(|word| word.len() > 1)
+            .map(str::to_string)
+            .collect()
+    };
+    let (ws, cs) = (words(&wanted), words(&candidate));
+    let within =
+        |a: &[String], b: &[String]| !a.is_empty() && a.iter().all(|word| b.contains(word));
+    if within(&cs, &ws) || within(&ws, &cs) {
+        return 1;
+    }
+    0
+}
+
+/// [`normalize_name`] less a trailing platform number: `"Gare Routière Quai 04"` →
+/// `"gare routiere"`.
+fn station_name(name: &str) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    let normalized = normalize_name(name);
+    words.extend(normalized.split(' '));
+    while words
+        .last()
+        .is_some_and(|word| word.chars().all(|c| c.is_ascii_digit()))
+    {
+        words.pop();
+    }
+    while words
+        .last()
+        .is_some_and(|word| matches!(*word, "quai" | "voie" | "platform" | "q"))
+    {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+/// The platform number in a name or ref: `"Gare Routière Quai 04"` / `"Quai 4"` / `"4"` → 4.
+fn platform_number(text: &str) -> Option<u32> {
+    normalize_name(text)
+        .split(' ')
+        .next_back()
+        .and_then(|word| word.parse().ok())
+}
+
+/// Nearby candidates come nearest first. The best name match wins over a nearer stop with another
+/// name (a tapped POI's position is approximate, and bus stops cluster at junctions); among
+/// stops named alike, the one numbered `platform` wins, else the nearest — a bus station's
+/// platforms each get their own departures.
+fn pick_stop(
+    matches: Vec<GeocodeMatch>,
+    lat: f64,
+    lon: f64,
+    name: &str,
+    platform: Option<&str>,
+) -> Option<Stop> {
+    let platform = platform.and_then(platform_number);
     let near: Vec<GeocodeMatch> = matches
         .into_iter()
         .filter(|m| distance_m(lat, lon, m.lat, m.lon) <= MAX_STOP_DISTANCE_M)
         .collect();
-    let index = near
-        .iter()
-        .position(|m| !wanted.is_empty() && normalize_name(&m.name) == wanted)
-        .or_else(|| {
-            near.iter().position(|m| {
-                let candidate = normalize_name(&m.name);
-                !wanted.is_empty() && (candidate.contains(&wanted) || wanted.contains(&candidate))
-            })
+    let scores: Vec<u8> = near.iter().map(|m| name_score(name, &m.name)).collect();
+    let best = scores.iter().copied().max().unwrap_or(0);
+    let index = (best > 0)
+        .then(|| {
+            let alike = |i: &usize| scores[*i] == best;
+            (0..near.len())
+                .filter(alike)
+                .find(|&i| platform.is_some() && platform_number(&near[i].name) == platform)
+                .or_else(|| (0..near.len()).find(alike))
         })
+        .flatten()
         .unwrap_or(0);
     near.into_iter().nth(index).map(|m| Stop {
         id: m.id,
@@ -403,13 +524,48 @@ mod tests {
             48.8590,
             2.2945,
             "Tour Eiffel",
+            None,
         );
         assert_eq!(picked.map(|s| s.name).as_deref(), Some("Tour Eiffel"));
     }
 
     #[test]
+    fn bus_station_platforms_get_their_own_stop() {
+        // Aix-en-Provence's bus station, as Transitous' feeds name it, nearest first.
+        let stops = || {
+            vec![
+                candidate("G.R. Belges", 43.52367, 5.44266),
+                candidate("Gare Routière 02", 43.52347, 5.44167),
+                candidate("Gare Routière Quai 04", 43.52325, 5.44144),
+                candidate("AIX GARE ROUTIERE", 43.52334, 5.44113),
+                candidate("Gareroutière", 43.52368, 5.43900),
+            ]
+        };
+        let name = "Aix-en-Provence - Gare Routière";
+        let pick = |platform| {
+            pick_stop(stops(), 43.5234, 5.4414, name, platform)
+                .map(|stop| stop.name)
+                .unwrap()
+        };
+        assert_eq!(pick(Some("Quai 4")), "Gare Routière Quai 04");
+        assert_eq!(pick(Some("2")), "Gare Routière 02");
+        // No such platform: the nearest one named alike, never the unrelated nearest stop.
+        assert_eq!(pick(Some("17")), "Gare Routière 02");
+        assert_eq!(pick(None), "Gare Routière 02");
+        assert_eq!(name_score(name, "AIX GARE ROUTIERE"), 1);
+        assert_eq!(name_score(name, "Gareroutière"), 2);
+        assert_eq!(name_score(name, "G.R. Belges"), 0);
+    }
+
+    #[test]
     fn ignores_stops_out_of_range() {
-        let picked = pick_stop(vec![candidate("Far", 48.90, 2.35)], 48.8590, 2.2945, "Far");
+        let picked = pick_stop(
+            vec![candidate("Far", 48.90, 2.35)],
+            48.8590,
+            2.2945,
+            "Far",
+            None,
+        );
         assert!(picked.is_none());
     }
 

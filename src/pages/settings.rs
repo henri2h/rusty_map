@@ -213,7 +213,7 @@ fn source_row(source: &Source) -> Element {
         .cursor(CursorIcon::Pointer)
         .on_press(move |_: Event<PressEventData>| {
             haptic(Haptic::Press);
-            Platform::get().open_url(url);
+            crate::mobile::open_url(url);
         })
         .child(
             rect()

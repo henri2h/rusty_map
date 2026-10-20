@@ -269,6 +269,7 @@ impl FavoritesPage {
                         lon: favorite.lon,
                         name: favorite.name.clone(),
                         line: None,
+                        platform: None,
                     })
                     .into_element()
             }))

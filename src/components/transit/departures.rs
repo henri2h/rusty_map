@@ -44,6 +44,9 @@ pub struct Departures {
     pub name: String,
     /// Only this line's departures (its OSM `ref`, e.g. `"14"`), when set.
     pub line: Option<String>,
+    /// The stop's platform (OSM `local_ref`/`ref`, e.g. `"Quai 4"`), telling a bus station's
+    /// stops apart (see `api::departures_near`).
+    pub platform: Option<String>,
 }
 
 impl Component for Departures {
@@ -55,6 +58,7 @@ impl Component for Departures {
             lon: self.lon,
             name: self.name.clone(),
             line: self.line.clone(),
+            platform: self.platform.clone(),
             when: *when.read(),
             when_state: when,
         }
@@ -73,6 +77,7 @@ struct DepartureBoard {
     lon: f64,
     name: String,
     line: Option<String>,
+    platform: Option<String>,
     when: When,
     when_state: State<When>,
 }
@@ -87,6 +92,7 @@ impl Component for DepartureBoard {
         // so closing the drawer or selecting another place stops the refresh loop.
         use_hook({
             let (lat, lon, name, when) = (self.lat, self.lon, self.name.clone(), self.when);
+            let stop_platform = self.platform.clone();
             // One line's departures are a few among the stop's: ask for more to filter from.
             let count = if self.line.is_some() {
                 api::DEPARTURE_COUNT * 4
@@ -97,20 +103,28 @@ impl Component for DepartureBoard {
             move || {
                 spawn(async move {
                     loop {
-                        let next =
-                            match api::departures_near(lat, lon, name.clone(), when, count).await {
-                                Ok(Some(found)) => Load::Ready(found),
-                                Ok(None) => Load::NoStop,
-                                Err(err) => {
-                                    log::warn!("[transit] departures failed: {err:?}");
-                                    // Keep showing the last good list through a transient failure.
-                                    if matches!(*state.peek(), Load::Ready(_)) {
-                                        background_delay(REFRESH_EVERY).await;
-                                        continue;
-                                    }
-                                    Load::Failed
+                        let next = match api::departures_near(
+                            lat,
+                            lon,
+                            name.clone(),
+                            stop_platform.clone(),
+                            when,
+                            count,
+                        )
+                        .await
+                        {
+                            Ok(Some(found)) => Load::Ready(found),
+                            Ok(None) => Load::NoStop,
+                            Err(err) => {
+                                log::warn!("[transit] departures failed: {err:?}");
+                                // Keep showing the last good list through a transient failure.
+                                if matches!(*state.peek(), Load::Ready(_)) {
+                                    background_delay(REFRESH_EVERY).await;
+                                    continue;
                                 }
-                            };
+                                Load::Failed
+                            }
+                        };
                         if *state.peek() != next {
                             state.set(next);
                             platform.send(UserEvent::RequestRedraw);
@@ -253,7 +267,7 @@ impl Component for DepartureBoard {
                     .horizontal()
                     .cursor(CursorIcon::Pointer)
                     .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
-                    .on_press(|_: Event<PressEventData>| Platform::get().open_url(api::SOURCES_URL))
+                    .on_press(|_: Event<PressEventData>| crate::mobile::open_url(api::SOURCES_URL))
                     .child(
                         label()
                             .text("Timetables: Transitous · data sources")
@@ -266,7 +280,8 @@ impl Component for DepartureBoard {
     fn render_key(&self) -> DiffKey {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
-        ("departure-board", self.place_id, self.when).hash(&mut hasher);
+        // The platform too: it may only be known once the place's details load.
+        ("departure-board", self.place_id, self.when, &self.platform).hash(&mut hasher);
         DiffKey::U64(hasher.finish())
     }
 }
@@ -298,8 +313,11 @@ fn departure_row(departure: &Departure, now: i64) -> impl IntoElement {
 
     let (when, when_color) = if departure.cancelled {
         ("Cancelled".to_string(), LATE)
-    } else if minutes <= 0 {
+    } else if (-2..=0).contains(&minutes) {
         ("Now".to_string(), LIVE)
+    } else if minutes < 0 {
+        // A board for a past time.
+        (clock_time(departure.time), TEXT_MUTED)
     } else if minutes < RELATIVE_LIMIT_MIN {
         (format!("{minutes} min"), TEXT)
     } else {
@@ -400,6 +418,7 @@ impl Component for NextTimes {
                             saved.lat,
                             saved.lon,
                             saved.stop.clone(),
+                            None,
                             When::Now,
                             api::DEPARTURE_COUNT * 4,
                         )
@@ -494,8 +513,11 @@ fn time_chip(departure: &Departure, now: i64) -> impl IntoElement {
     let minutes = (departure.time - now).div_euclid(60);
     let (text, color) = if departure.cancelled {
         ("Cancelled".to_string(), LATE)
-    } else if minutes <= 0 {
+    } else if (-2..=0).contains(&minutes) {
         ("Now".to_string(), LIVE)
+    } else if minutes < 0 {
+        // A board for a past time.
+        (clock_time(departure.time), TEXT_MUTED)
     } else if minutes < RELATIVE_LIMIT_MIN {
         (format!("{minutes} min"), TEXT)
     } else {

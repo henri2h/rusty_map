@@ -4,6 +4,7 @@
 //! `map_style_loader.rs`) are what actually builds/drives the component tree.
 
 pub mod cache;
+pub mod coverage;
 pub mod labels;
 pub mod poi_lookup;
 pub mod renderer;

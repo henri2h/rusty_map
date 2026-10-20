@@ -23,7 +23,7 @@ use crate::components::{
         ui::{NavigationBanner, NavigationBar, RecenterChip},
     },
     place::PlaceController,
-    search::{SearchController, SearchPanel},
+    search::{SearchController, SearchPanel, pick_result},
     transit::{Endpoint, Field, TransitController},
 };
 
@@ -146,6 +146,25 @@ impl Component for HomePage {
                             transit.close_view();
                             search.reset(charger.name.clone());
                             places.select_charger(&charger);
+                        }
+                    })
+                    // A search result pin: shown like picking its row.
+                    .on_pin_tapped({
+                        let mut places = places.clone();
+                        let mut search = search.clone();
+                        let mut transit = transit.clone();
+                        let map = controller.clone();
+                        move |index: u64| {
+                            let Some(result) = search.results.peek().get(index as usize).cloned()
+                            else {
+                                return;
+                            };
+                            if *transit.planner_open.peek() {
+                                return;
+                            }
+                            haptic(Haptic::Select);
+                            transit.close_view();
+                            pick_result(&result, &map, &mut places, &mut search);
                         }
                     })
                     .on_map_tapped({
@@ -388,7 +407,7 @@ impl Component for Attribution {
                 .font_size(11.0)
                 .color(Color::from_rgb(60, 60, 60))
                 .cursor(CursorIcon::Pointer)
-                .on_press(move |_: Event<PressEventData>| Platform::get().open_url(url))
+                .on_press(move |_: Event<PressEventData>| crate::mobile::open_url(url))
         };
 
         let screen = use_screen();

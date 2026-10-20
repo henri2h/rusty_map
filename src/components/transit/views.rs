@@ -397,6 +397,7 @@ impl Component for LineView {
                                     lon,
                                     name,
                                     line: Some(route.line.clone()),
+                                    platform: None,
                                 })
                                 .into_element(),
                         );

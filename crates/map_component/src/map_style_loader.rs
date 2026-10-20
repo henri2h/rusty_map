@@ -74,22 +74,27 @@ async fn resolve_style(parsed: style::parser::ParsedStyle) -> StyleSpec {
         }
     }
 
-    // Our own tiles, in the same OpenMapTiles schema, replace the style's source.
-    let tile_url_template = match std::env::var(TILE_URL_ENV) {
-        Ok(url) if url == "style" => tiles_template.unwrap_or_else(|| {
-            log::warn!("[style] no usable vector source, using default source");
-            style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
-        }),
+    // Our own tiles, in the same OpenMapTiles schema, replace the style's source — in France,
+    // which is all they cover: elsewhere the style's own (whole planet) source still draws.
+    let (tile_url_template, fallback_tile_url_template) = match std::env::var(TILE_URL_ENV) {
+        Ok(url) if url == "style" => (
+            tiles_template.unwrap_or_else(|| {
+                log::warn!("[style] no usable vector source, using default source");
+                style::default::DEFAULT_TILE_URL_TEMPLATE.to_string()
+            }),
+            None,
+        ),
         Ok(url) if !url.is_empty() => {
             log::info!("[style] tiles from {TILE_URL_ENV}: {url}");
-            url
+            (url, None)
         }
-        _ => TILE_URL.to_string(),
+        _ => (TILE_URL.to_string(), tiles_template),
     };
 
     StyleSpec {
         layers: parsed.layers,
         tile_url_template,
+        fallback_tile_url_template,
         sprite_url: parsed.source.sprite_url,
         min_zoom: min_zoom
             .map(|z| z as f32)

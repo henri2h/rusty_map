@@ -103,8 +103,8 @@ pub struct CompiledLabel {
 /// One POI icon marker: normalized tile-local position plus the raw kind (e.g. `bakery`) it
 /// wants an icon for. Sprite sheets name icons differently per style (`icon-bakery`,
 /// `bakery_11`, …), so the actual sprite name is resolved against the loaded sheet at paint
-/// time — see [`crate::util::labels::resolve_sprite`] — and a kind with no matching sprite in
-/// any naming convention simply never draws.
+/// time — see [`crate::util::sprites::SpriteSheet::resolve_poi`], which falls back to a close
+/// kind's sprite, then the class's, then a generic dot.
 pub struct CompiledPoi {
     /// Raw POI kind straight off the feature's properties, e.g. `bakery`.
     pub kind: String,

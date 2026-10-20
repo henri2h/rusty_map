@@ -100,6 +100,7 @@ pub fn default_style() -> StyleSpec {
     StyleSpec {
         layers,
         tile_url_template: DEFAULT_TILE_URL_TEMPLATE.to_string(),
+        fallback_tile_url_template: None,
         sprite_url: Some(DEFAULT_SPRITE_URL.to_string()),
         min_zoom: DEFAULT_MIN_ZOOM,
         max_real_zoom: DEFAULT_MAX_REAL_ZOOM,

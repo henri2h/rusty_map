@@ -21,10 +21,11 @@ use freya::{icons::lucide, prelude::*};
 use torin::{content::Content, position::Position, prelude::Direction};
 
 use map_component::{
-    MapController,
+    Insets, MapController, MapMarker, MarkerGlyph, MarkerSet,
     util::{
+        sprites::SpriteSheet,
         tiles::background_delay,
-        viewport::{Viewport, center_to_lonlat, lonlat_to_center, max_zoom_ui},
+        viewport::{Viewport, center_to_lonlat, lonlat_to_center, max_zoom_ui, world_to_lonlat},
     },
 };
 
@@ -32,7 +33,9 @@ use crate::{
     components::{
         charging::ChargerLive,
         favorites::{Favorite, Favorites},
+        panoramax::StreetPhotos,
         place::{PlaceController, SelectedPlace, humanize},
+        poi_icon::poi_icon,
         transit::{
             Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
             TripView, central_european_offset,
@@ -65,6 +68,165 @@ const RESULT_ZOOM: f32 = 16.0;
 const PANEL_WIDTH: f32 = 360.0;
 const RESULTS_MAX_HEIGHT: f32 = 320.0;
 const ICON_SIZE: f32 = 18.0;
+
+/// A kind of place the category chips search the visible map for.
+struct Category {
+    label: &'static str,
+    /// The POI kind whose icon the chip shows (see [`poi_icon`]).
+    kind: &'static str,
+    /// OSM `key.value` tags it covers (Photon `include` categories); a bare key covers all its
+    /// values.
+    tags: &'static [&'static str],
+    /// What people type for it (lowercase, unaccented, French and English), searched as the
+    /// category rather than as a name: few bakeries are *named* "boulangerie".
+    words: &'static [&'static str],
+}
+
+const CATEGORIES: &[Category] = &[
+    Category {
+        label: "Restaurants",
+        kind: "restaurant",
+        tags: &["amenity.restaurant", "amenity.fast_food"],
+        words: &["restaurant", "restaurants", "resto", "restos", "fast food"],
+    },
+    Category {
+        label: "Cafés",
+        kind: "cafe",
+        tags: &["amenity.cafe"],
+        words: &["cafe", "cafes", "coffee"],
+    },
+    Category {
+        label: "Bakeries",
+        kind: "bakery",
+        tags: &["shop.bakery", "shop.pastry"],
+        words: &[
+            "boulangerie",
+            "boulangeries",
+            "patisserie",
+            "bakery",
+            "bakeries",
+            "pain",
+        ],
+    },
+    Category {
+        label: "Groceries",
+        kind: "supermarket",
+        tags: &["shop.supermarket", "shop.convenience", "shop.greengrocer"],
+        words: &[
+            "supermarche",
+            "supermarches",
+            "epicerie",
+            "superette",
+            "courses",
+            "grocery",
+            "groceries",
+            "supermarket",
+        ],
+    },
+    Category {
+        label: "Bars",
+        kind: "bar",
+        tags: &["amenity.bar", "amenity.pub"],
+        words: &["bar", "bars", "pub", "pubs"],
+    },
+    Category {
+        label: "Pharmacies",
+        kind: "pharmacy",
+        tags: &["amenity.pharmacy"],
+        words: &["pharmacie", "pharmacies", "pharmacy"],
+    },
+    Category {
+        label: "Health",
+        kind: "doctors",
+        tags: &[
+            "amenity.doctors",
+            "amenity.dentist",
+            "amenity.clinic",
+            "amenity.hospital",
+            "healthcare",
+        ],
+        words: &[
+            "medecin",
+            "medecins",
+            "docteur",
+            "doctor",
+            "doctors",
+            "dentiste",
+            "dentist",
+            "sante",
+            "health",
+            "kine",
+            "kinesitherapeute",
+            "infirmier",
+            "infirmiere",
+            "hopital",
+            "hospital",
+            "clinique",
+        ],
+    },
+    Category {
+        label: "Fuel",
+        kind: "fuel",
+        tags: &["amenity.fuel"],
+        words: &[
+            "essence",
+            "carburant",
+            "station service",
+            "fuel",
+            "gas station",
+        ],
+    },
+    Category {
+        label: "Charging",
+        kind: "charging_station",
+        tags: &["amenity.charging_station"],
+        words: &["recharge", "borne", "bornes", "charging", "charger"],
+    },
+    Category {
+        label: "Parking",
+        kind: "parking",
+        tags: &["amenity.parking"],
+        words: &["parking", "parkings"],
+    },
+    Category {
+        label: "Hotels",
+        kind: "hotel",
+        tags: &["tourism.hotel", "tourism.hostel", "tourism.guest_house"],
+        words: &["hotel", "hotels", "hebergement", "auberge"],
+    },
+    Category {
+        label: "ATMs",
+        kind: "atm",
+        tags: &["amenity.atm"],
+        words: &["distributeur", "dab", "atm", "atms", "cash"],
+    },
+];
+
+/// The category `query` names (`"Boulangerie"`, `"médecin"`), if any.
+fn category_for(query: &str) -> Option<&'static Category> {
+    let wanted = fold(query);
+    CATEGORIES.iter().find(|category| {
+        fold(category.label) == wanted || category.words.contains(&wanted.as_str())
+    })
+}
+
+/// Lowercase, accents dropped, spaces collapsed: `" Médecin "` → `"medecin"`.
+fn fold(text: &str) -> String {
+    let folded: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'â' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' => 'i',
+            'ô' | 'ö' => 'o',
+            'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 const TEXT: Color = Color::from_rgb(32, 33, 36);
 const TEXT_MUTED: Color = Color::from_rgb(95, 99, 104);
@@ -127,11 +289,32 @@ impl Component for SearchPanel {
             }
         });
 
+        // The listed results, pinned on the map (tapping one picks it, see `HomePage`).
+        use_side_effect({
+            let (results, mut map) = (search.results, map.clone());
+            move || {
+                let markers: Vec<MapMarker> = results
+                    .read()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, result)| {
+                        MapMarker::from_lonlat(index as u64, result.lon, result.lat, PIN)
+                    })
+                    .collect();
+                map.set_pins((!markers.is_empty()).then_some(MarkerSet {
+                    markers,
+                    selected: None,
+                    glyph: MarkerGlyph::Dot,
+                }));
+            }
+        });
+
         let on_validate = build_on_search_input(map, places, search);
         let has_query = !search.query.read().is_empty();
         let status = *search.status.read();
         let results = search.results.read().clone();
         let place = places.selected_place.read().clone();
+        let sprites = map.sprites.read().clone();
         let view = transit.view.read().clone();
         let planner_open = *transit.planner_open.read();
         let drawer_open = place.is_some() || view.is_some() || planner_open;
@@ -210,7 +393,17 @@ impl Component for SearchPanel {
                 icon(lucide::search(), TEXT_FAINT).into_element()
             })
             .a11y_id(input_id)
-            .on_validate(on_validate);
+            .on_validate(on_validate)
+            // Enter: every match on the visible map, not just the few best anywhere.
+            .on_submit({
+                let map = map.clone();
+                let mut places = places.clone();
+                let mut search = search.clone();
+                move |text: String| {
+                    places.clear();
+                    search_query_in_view(text, &map, &mut search);
+                }
+            });
         if !has_query {
             let mut transit = transit.clone();
             input = input.trailing(
@@ -263,6 +456,17 @@ impl Component for SearchPanel {
                 if !saved.is_empty() {
                     content.push(favorite_chips(saved, map, places, search));
                 }
+                let categories: Vec<&'static Category> = CATEGORIES
+                    .iter()
+                    .filter(|category| {
+                        let query = fold(&query);
+                        fold(category.label).contains(&query)
+                            || category.words.iter().any(|word| word.starts_with(&query))
+                    })
+                    .collect();
+                if !categories.is_empty() {
+                    content.push(category_chips(categories, sprites.as_deref(), map, search));
+                }
             }
             content.extend(dropdown);
             if let Some(view) = view {
@@ -281,6 +485,10 @@ impl Component for SearchPanel {
             let mut transit = transit.clone();
             move |e: Event<KeyboardEventData>| {
                 if e.key != Key::Named(NamedKey::BrowserBack) {
+                    return;
+                }
+                // Back closes the photo viewer first.
+                if crate::components::panoramax::viewer_handles_back() {
                     return;
                 }
                 // The pick banner's own handler stops picking.
@@ -539,6 +747,20 @@ fn results_dropdown(
     places: &PlaceController,
     search: &SearchController,
 ) -> Element {
+    let sprites = map.sprites.read().clone();
+    // Distances from the user when located, else from the middle of the visible map.
+    let origin = map
+        .user_location
+        .read()
+        .as_ref()
+        .map(|location| {
+            let (lon, lat) = world_to_lonlat(location.point.0, location.point.1);
+            (lat, lon)
+        })
+        .unwrap_or_else(|| {
+            let (_, (lon, lat)) = visible_area(map);
+            (lat, lon)
+        });
     let body = if !results.is_empty() {
         scroll
             .track(ScrollView::new())
@@ -549,11 +771,9 @@ fn results_dropdown(
             .maybe(!fill, |r| r.max_height(Size::px(RESULTS_MAX_HEIGHT)))
             .direction(Direction::vertical())
             .child(scroll.marker())
-            .children(
-                results
-                    .into_iter()
-                    .map(|result| result_row(result, map, places, search).into_element()),
-            )
+            .children(results.into_iter().map(|result| {
+                result_row(result, origin, sprites.as_deref(), map, places, search).into_element()
+            }))
             .into_element()
     } else {
         let (svg, text) = match status {
@@ -591,6 +811,8 @@ fn results_dropdown(
 
 fn result_row(
     result: SearchResult,
+    (origin_lat, origin_lon): (f64, f64),
+    sprites: Option<&SpriteSheet>,
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
@@ -601,6 +823,16 @@ fn result_row(
         .filter(|part| !part.is_empty() && *part != title)
         .collect::<Vec<_>>()
         .join(" · ");
+    let distance = search::format_distance(search::distance_m(
+        origin_lat, origin_lon, result.lat, result.lon,
+    ));
+    let icon = poi_icon(
+        sprites,
+        &result.category,
+        Some(&result.osm_key),
+        ICON_SIZE,
+        TEXT_MUTED,
+    );
 
     let map = map.clone();
     let mut places = places.clone();
@@ -610,9 +842,7 @@ fn result_row(
         .flat()
         .width(Size::fill())
         .on_press(move |_: Event<PressEventData>| {
-            fly_to(&map, result.lat, result.lon);
-            search.reset(result.title().to_string());
-            places.select_search_result(&result, map.platform.clone());
+            pick_result(&result, &map, &mut places, &mut search)
         })
         .child(
             rect()
@@ -622,7 +852,7 @@ fn result_row(
                 .cross_align(Alignment::Center)
                 .spacing(12.0)
                 .padding((tap_padding(6.0), 4.0))
-                .child(icon(lucide::map_pin(), TEXT_FAINT))
+                .child(icon)
                 .child(
                     rect()
                         .vertical()
@@ -645,9 +875,30 @@ fn result_row(
                                     .text_overflow(TextOverflow::Ellipsis),
                             )
                         }),
+                )
+                .child(
+                    label()
+                        .text(distance)
+                        .font_size(text_size(12.0))
+                        .color(TEXT_FAINT),
                 ),
         )
 }
+
+/// Shows a search result: the map centred on it, its details in the drawer.
+pub fn pick_result(
+    result: &SearchResult,
+    map: &MapController,
+    places: &mut PlaceController,
+    search: &mut SearchController,
+) {
+    fly_to(map, result.lat, result.lon);
+    search.reset(result.title().to_string());
+    places.select_search_result(result, map.platform.clone());
+}
+
+/// Colour of the search result pins on the map.
+const PIN: Color = Color::from_rgb(234, 67, 53);
 
 /// Centres the map on (`lat`, `lon`) at street level (capped by the style's max zoom), in the
 /// part of the map the drawer leaves visible — the callers all open the drawer.
@@ -716,8 +967,147 @@ fn favorite_chips(
         .into_element()
 }
 
+/// Kinds of place to look for on the visible map, under the idle search pill: one tap lists them.
+fn category_chips(
+    categories: Vec<&'static Category>,
+    sprites: Option<&SpriteSheet>,
+    map: &MapController,
+    search: &SearchController,
+) -> Element {
+    let chips = categories.into_iter().map(|category| {
+        let map = map.clone();
+        let mut search = search.clone();
+        chip(
+            poi_icon(sprites, category.kind, None, 14.0, TEXT_MUTED),
+            category.label,
+            move || search_category(category, &map, &mut search),
+        )
+    });
+    ScrollView::new()
+        .direction(Direction::horizontal())
+        .width(Size::fill())
+        .height(Size::auto())
+        .show_scrollbar(false)
+        .child(
+            rect()
+                .horizontal()
+                .spacing(6.0)
+                .padding((6.0f32, 4.0f32, 2.0f32, 4.0f32))
+                .children(chips),
+        )
+        .into_element()
+}
+
+/// Lists the `category`'s places on the visible map in the results dropdown, nearest to its
+/// centre first, under the category's name in the search box.
+fn search_category(
+    category: &'static Category,
+    map: &MapController,
+    search: &mut SearchController,
+) {
+    search_visible(
+        category.label.to_string(),
+        map,
+        search,
+        move |bounds, center| search::search_category(category.tags, bounds, center),
+    );
+}
+
+/// Lists every match for `query` on the visible map (Enter in the search box), nearest first.
+fn search_query_in_view(query: String, map: &MapController, search: &mut SearchController) {
+    if query.trim().chars().count() < MIN_QUERY_LEN {
+        return;
+    }
+    if let Some(category) = category_for(&query) {
+        search_visible(query, map, search, move |bounds, center| {
+            search::search_category(category.tags, bounds, center)
+        });
+        return;
+    }
+    let text = query.trim().to_string();
+    search_visible(query, map, search, move |bounds, center| {
+        search::search_in_area(text, bounds, center)
+    });
+}
+
+/// `((min_lon, min_lat), (max_lon, max_lat))`.
+type LonLatBounds = ((f64, f64), (f64, f64));
+
+/// The part of the map not covered by the panel, as `(bounds, centre)` lon/lat (see
+/// `MapController::visible_lonlat_bounds`).
+fn visible_area(map: &MapController) -> (LonLatBounds, (f64, f64)) {
+    let area = map.viewport_size.peek().size;
+    let insets = if is_compact(area.width) {
+        Insets {
+            bottom: area.height * SHEET_PERCENT / 100.0,
+            ..Insets::default()
+        }
+    } else {
+        Insets {
+            left: PANEL_WIDTH + 12.0,
+            ..Insets::default()
+        }
+    };
+    let bounds @ ((min_lon, min_lat), (max_lon, max_lat)) = map.visible_lonlat_bounds(insets);
+    (
+        bounds,
+        ((min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0),
+    )
+}
+
+/// Shows `query` in the search box and `fetch`'s places on the visible map in the results
+/// dropdown.
+fn search_visible<Fut>(
+    query: String,
+    map: &MapController,
+    search: &mut SearchController,
+    fetch: impl FnOnce(((f64, f64), (f64, f64)), (f64, f64)) -> Fut,
+) where
+    Fut: std::future::Future<
+            Output = Result<Vec<SearchResult>, map_component::util::tiles::FetchError>,
+        > + 'static,
+{
+    search.reset(query);
+    search.status.set(SearchStatus::Searching);
+    let (bounds, center) = visible_area(map);
+    let request = fetch(bounds, center);
+    let (mut results, mut status) = (search.results, search.status);
+    let platform = map.platform.clone();
+    // `spawn_in_window`, not `spawn`: a chip's press runs in the scope of the chip row's
+    // `ScrollView`, unmounted as soon as the input loses focus — which cancelled the request
+    // and left "Searching…" forever. `search.task` still lets a new search cancel it.
+    let handle = spawn_in_window(async move {
+        match request.await {
+            Ok(list) => {
+                results.set(list);
+                status.set(SearchStatus::Done);
+            }
+            Err(err) => {
+                log::warn!("[search] area request failed: {err:?}");
+                results.set(Vec::new());
+                status.set(SearchStatus::Failed);
+            }
+        }
+        platform.send(UserEvent::RequestRedraw);
+    });
+    search.task.set(Some(handle));
+}
+
 /// A saved place as a small rounded button: star (or a train for stops) plus its name.
-pub fn favorite_chip(name: &str, stop: bool, mut on_press: impl FnMut() + 'static) -> Element {
+pub fn favorite_chip(name: &str, stop: bool, on_press: impl FnMut() + 'static) -> Element {
+    let icon = SvgViewer::new(if stop {
+        lucide::train_front()
+    } else {
+        lucide::star()
+    })
+    .width(Size::px(13.0))
+    .height(Size::px(13.0))
+    .color(STAR);
+    chip(icon.into_element(), name, on_press)
+}
+
+/// A small rounded button: an icon plus a name.
+fn chip(icon: Element, name: &str, mut on_press: impl FnMut() + 'static) -> Element {
     rect()
         .horizontal()
         .cross_align(Alignment::Center)
@@ -730,16 +1120,7 @@ pub fn favorite_chip(name: &str, stop: bool, mut on_press: impl FnMut() + 'stati
             haptic(Haptic::Press);
             on_press();
         })
-        .child(
-            SvgViewer::new(if stop {
-                lucide::train_front()
-            } else {
-                lucide::star()
-            })
-            .width(Size::px(13.0))
-            .height(Size::px(13.0))
-            .color(STAR),
-        )
+        .child(icon)
         .child(
             label()
                 .text(name.to_string())
@@ -759,6 +1140,7 @@ fn build_on_search_input(
     let mut places = places.clone();
     let center = map.center;
     let platform = map.platform.clone();
+    let map = map.clone();
 
     move |validator: InputValidator| {
         let text = validator.text().clone();
@@ -779,12 +1161,52 @@ fn build_on_search_input(
             search.status.set(SearchStatus::Searching);
         }
         let bias = Some(center_to_lonlat(*center.peek()));
+        // A category's name ("boulangerie") lists that kind of place on the visible map.
+        let category = category_for(&text).map(|category| (category, visible_area(&map)));
         let mut results = search.results;
         let mut status = search.status;
         let platform = platform.clone();
         let handle = spawn(async move {
             background_delay(SEARCH_DEBOUNCE).await;
-            match search::search_address(text, bias).await {
+            // IGN's geocoder (France) answers in a fraction of a second, Photon in several: show
+            // IGN's results meanwhile, then Photon's (OSM, full details) once in.
+            let mut quick = false;
+            let found = match category {
+                Some((category, (bounds, center))) => {
+                    search::search_category(category.tags, bounds, center).await
+                }
+                None => {
+                    let mut photon = std::pin::pin!(search::search_address(text.clone(), bias));
+                    let first = tokio::select! {
+                        biased;
+                        found = &mut photon => Some(found),
+                        ign = search::search_ign(text, bias) => {
+                            if let Ok(list) = ign
+                                && !list.is_empty()
+                            {
+                                results.set(list);
+                                quick = true;
+                                platform.send(UserEvent::RequestRedraw);
+                            }
+                            None
+                        }
+                    };
+                    match first {
+                        Some(found) => found,
+                        None => photon.await,
+                    }
+                }
+            };
+            // Photon failed or found nothing: IGN's results stay.
+            if quick && !matches!(&found, Ok(list) if !list.is_empty()) {
+                if let Err(err) = &found {
+                    log::warn!("[search] Photon failed, keeping IGN results: {err:?}");
+                }
+                status.set(SearchStatus::Done);
+                platform.send(UserEvent::RequestRedraw);
+                return;
+            }
+            match found {
                 Ok(list) => {
                     results.set(list);
                     status.set(SearchStatus::Done);
@@ -820,7 +1242,7 @@ fn place_details(
         title,
         subtitle,
         mut details,
-        raw_tags,
+        mut raw_tags,
         links,
         loading,
         image,
@@ -829,6 +1251,11 @@ fn place_details(
         charger,
         ..
     } = place;
+    // The street-level photo mappers picked, shown first by the Panoramax strip.
+    let panoramax_tag = raw_tags
+        .iter()
+        .position(|(key, _)| key == "panoramax")
+        .map(|index| raw_tags.remove(index).1);
 
     // The Wikipedia intro is a paragraph, not a label/value row — shown as its own block.
     let wikipedia = details
@@ -841,7 +1268,7 @@ fn place_details(
         "Address" => 0,
         "Opening hours" => 1,
         "Coordinates" => 3,
-        "Source" | "Source date" | "Last edited" => 4,
+        "SIRET" | "Source" | "Source date" | "Last checked" | "Last edited" => 4,
         _ => 2,
     });
     let is_empty = details.is_empty() && links.is_empty() && wikipedia.is_none();
@@ -982,6 +1409,16 @@ fn place_details(
         );
     }
     if let Some((lat, lon)) = transit_stop {
+        // OSM numbers a bus station's platforms (`local_ref=4`, or `ref=Quai 4`).
+        let platform = details
+            .iter()
+            .find(|(key, _)| key == "Platform")
+            .or_else(|| {
+                raw_tags
+                    .iter()
+                    .find(|(key, _)| key == "ref" || key == "local_ref")
+            })
+            .map(|(_, value)| value.clone());
         body.push(
             Departures {
                 place_id: id,
@@ -989,6 +1426,7 @@ fn place_details(
                 lon,
                 name: title,
                 line: None,
+                platform,
             }
             .into_element(),
         );
@@ -1030,6 +1468,17 @@ fn place_details(
     if let Some(intro) = wikipedia {
         body.push(wikipedia_block(intro).into_element());
     }
+    if let Some((lat, lon)) = coords {
+        body.push(
+            StreetPhotos {
+                place_id: id,
+                lat,
+                lon,
+                picture: panoramax_tag,
+            }
+            .into_element(),
+        );
+    }
     if !raw_tags.is_empty() {
         body.push(
             RawTags {
@@ -1061,7 +1510,31 @@ fn detail_icon(label: &str) -> Option<Bytes> {
         "Wheelchair access" => lucide::accessibility(),
         "Fee" | "Fare" => lucide::coins(),
         "Cuisine" => lucide::utensils(),
-        "Amenity" | "Shop" => lucide::store(),
+        "Amenity" | "Shop" | "Craft" => lucide::store(),
+        "Office" => lucide::briefcase(),
+        "Healthcare" | "Speciality" => lucide::stethoscope(),
+        "Tourism" | "Leisure" => lucide::camera(),
+        "Historic" => lucide::landmark(),
+        "Artwork" | "Artist" => lucide::palette(),
+        "Building" | "Land use" => lucide::building(),
+        "Floor" => lucide::layers(),
+        "Smoking" => lucide::cigarette(),
+        "Collection times" => lucide::mailbox(),
+        "Platform" | "Lines" | "Network" => lucide::bus(),
+        "Shelter" | "Bench" | "Tactile paving" => lucide::umbrella(),
+        "SIRET" | "Company record" => lucide::file_text(),
+        "Last checked" => lucide::badge_check(),
+        "Payment" => lucide::credit_card(),
+        "Fuels" => lucide::fuel(),
+        "Sockets" => lucide::plug_zap(),
+        "Recycling" => lucide::recycle(),
+        "Capacity" => lucide::users(),
+        "Access" | "Self service" => lucide::door_open(),
+        "Religion" | "Denomination" => lucide::church(),
+        "Delivery" | "Drive-through" => lucide::truck(),
+        "Wheelchair toilets" => lucide::accessibility(),
+        "Air conditioning" => lucide::snowflake(),
+        "Facebook" | "Instagram" | "TikTok" | "YouTube" | "LinkedIn" => lucide::at_sign(),
         "Brand" => lucide::tag(),
         "Operator" => lucide::building_2(),
         "Internet access" => lucide::wifi(),
@@ -1103,6 +1576,18 @@ fn detail_row(key: String, value: String) -> Element {
     if key == "Coordinates" {
         return CoordinatesRow { value }.into_element();
     }
+    if key == "Collection times" {
+        return hours_table(&key, value, false).into_element();
+    }
+    // A tap calls (the phone app, on Android) or writes an email.
+    let link = match key.as_str() {
+        "Phone" => Some("tel:"),
+        "Email" => Some("mailto:"),
+        _ => None,
+    };
+    if let Some(scheme) = link {
+        return contact_row(key, value, scheme);
+    }
 
     icon_row(
         &key,
@@ -1116,6 +1601,50 @@ fn detail_row(key: String, value: String) -> Element {
                     .color(TEXT)
                     .width(Size::fill()),
             )
+            .child(
+                label()
+                    .text(key.clone())
+                    .font_size(text_size(11.0))
+                    .color(TEXT_FAINT),
+            ),
+    )
+    .into_element()
+}
+
+/// Phone numbers or email addresses (`;`-separated in OSM), each opening `scheme`'s app.
+fn contact_row(key: String, value: String, scheme: &'static str) -> Element {
+    let entries: Vec<String> = value
+        .split(';')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    icon_row(
+        &key,
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .children(entries.into_iter().map(|entry| {
+                // `tel:` takes no spaces or dots: `+33 4 42 00 00 00` → `+33442000000`.
+                let target = if scheme == "tel:" {
+                    entry
+                        .chars()
+                        .filter(|c| c.is_ascii_digit() || *c == '+')
+                        .collect::<String>()
+                } else {
+                    entry.clone()
+                };
+                label()
+                    .text(entry)
+                    .font_size(text_size(14.0))
+                    .color(ACCENT)
+                    .cursor(CursorIcon::Pointer)
+                    .padding((tap_padding(0.0), 0.0))
+                    .on_press(move |_: Event<PressEventData>| {
+                        haptic(Haptic::Press);
+                        crate::mobile::open_url(format!("{scheme}{target}"));
+                    })
+                    .into_element()
+            }))
             .child(
                 label()
                     .text(key.clone())
@@ -1174,15 +1703,21 @@ impl Component for CoordinatesRow {
 /// Renders a parsed `opening_hours` value (see `opening_hours::parse_opening_hours`) as a small
 /// day/hours table — one row per rule, day label left, hours right.
 fn opening_hours_row(value: String) -> impl IntoElement {
+    hours_table("Opening hours", value, true)
+}
+
+/// A day/hours table for `opening_hours`-syntax `value` under `key`; `open_now`: with the
+/// open/closed-now line above it.
+fn hours_table(key: &str, value: String, open_now: bool) -> impl IntoElement {
     let rules = parse_opening_hours(&value);
 
     icon_row(
-        "Opening hours",
+        key,
         rect()
             .vertical()
             .width(Size::fill())
             .spacing(2.0)
-            .child(OpenNow { raw: value })
+            .maybe_child(open_now.then(|| OpenNow { raw: value }.into_element()))
             .children(rules.into_iter().map(|rule| {
                 rect()
                     .horizontal()
@@ -1206,7 +1741,7 @@ fn opening_hours_row(value: String) -> impl IntoElement {
             }))
             .child(
                 label()
-                    .text("Opening hours")
+                    .text(key.to_string())
                     .font_size(text_size(11.0))
                     .color(TEXT_FAINT),
             ),
@@ -1322,8 +1857,9 @@ fn wikipedia_block(intro: String) -> impl IntoElement {
                         .color(TEXT_FAINT)
                         .cursor(CursorIcon::Pointer)
                         .on_press(|_: Event<PressEventData>| {
-                            Platform::get()
-                                .open_url("https://creativecommons.org/licenses/by-sa/4.0/")
+                            crate::mobile::open_url(
+                                "https://creativecommons.org/licenses/by-sa/4.0/",
+                            )
                         }),
                 ),
         )
@@ -1360,7 +1896,7 @@ fn link_chip(link_label: String, url: String, title: &str) -> impl IntoElement {
                 haptic(Haptic::Press);
                 share(&title, &url);
             } else {
-                Platform::get().open_url(url.clone());
+                crate::mobile::open_url(url.clone());
             }
         })
         .child(
@@ -1461,4 +1997,17 @@ impl Component for RawTags {
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_words_name_categories() {
+        assert_eq!(category_for(" Boulangerie ").unwrap().label, "Bakeries");
+        assert_eq!(category_for("médecin").unwrap().label, "Health");
+        assert_eq!(category_for("cafés").unwrap().label, "Cafés");
+        assert!(category_for("Boulangerie Paul").is_none());
+    }
 }

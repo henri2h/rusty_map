@@ -694,7 +694,23 @@ fn value_to_string(value: &mvt_reader::feature::Value) -> Option<String> {
 /// pairs `shom_client`'s own `search.rs` used. `website`/`contact:website` deliberately isn't
 /// here — it becomes a clickable link instead (see [`enrich_from_tags`]).
 const RICH_DETAIL_KEYS: &[(&str, &str)] = &[
+    // What the place is.
+    ("shop", "Shop"),
+    ("amenity", "Amenity"),
+    ("office", "Office"),
+    ("craft", "Craft"),
+    ("healthcare", "Healthcare"),
+    ("healthcare:speciality", "Speciality"),
+    ("tourism", "Tourism"),
+    ("leisure", "Leisure"),
+    ("historic", "Historic"),
+    ("artwork_type", "Artwork"),
+    ("artist_name", "Artist"),
+    ("building", "Building"),
+    ("landuse", "Land use"),
     ("opening_hours", "Opening hours"),
+    // A post box's pick-up times, in `opening_hours` syntax.
+    ("collection_times", "Collection times"),
     ("phone", "Phone"),
     ("contact:phone", "Phone"),
     ("email", "Email"),
@@ -715,9 +731,57 @@ const RICH_DETAIL_KEYS: &[(&str, &str)] = &[
     ("diet:vegan", "Vegan"),
     ("start_date", "Since"),
     ("height", "Height"),
+    ("level", "Floor"),
+    ("smoking", "Smoking"),
+    // Bus stops.
+    ("local_ref", "Platform"),
+    ("route_ref", "Lines"),
+    ("network", "Network"),
+    ("shelter", "Shelter"),
+    ("bench", "Bench"),
+    ("tactile_paving", "Tactile paving"),
+    ("capacity", "Capacity"),
+    ("access", "Access"),
+    ("religion", "Religion"),
+    ("denomination", "Denomination"),
+    ("delivery", "Delivery"),
+    ("drive_through", "Drive-through"),
+    ("toilets:wheelchair", "Wheelchair toilets"),
+    ("air_conditioning", "Air conditioning"),
+    ("self_service", "Self service"),
+    ("ref:FR:SIRET", "SIRET"),
+    ("check_date", "Last checked"),
     ("source", "Source"),
     ("source:date", "Source date"),
     ("ref:mhs", "Mérimée reference"),
+];
+
+/// Families of `prefix:<thing>=yes` tags folded into one row listing the things.
+const TAG_GROUPS: &[(&str, &str)] = &[
+    ("payment:", "Payment"),
+    ("fuel:", "Fuels"),
+    ("socket:", "Sockets"),
+    ("recycling:", "Recycling"),
+];
+
+/// Social profile tags, as `(key, link label, URL for a bare handle)`: a value that's already a
+/// URL is used as is.
+const SOCIAL_KEYS: &[(&str, &str, &str)] = &[
+    ("contact:facebook", "Facebook", "https://www.facebook.com/"),
+    ("facebook", "Facebook", "https://www.facebook.com/"),
+    (
+        "contact:instagram",
+        "Instagram",
+        "https://www.instagram.com/",
+    ),
+    ("instagram", "Instagram", "https://www.instagram.com/"),
+    ("contact:tiktok", "TikTok", "https://www.tiktok.com/@"),
+    ("contact:youtube", "YouTube", "https://www.youtube.com/"),
+    (
+        "contact:linkedin",
+        "LinkedIn",
+        "https://www.linkedin.com/company/",
+    ),
 ];
 
 /// `true` when the place is registered in France's *Monuments Historiques* heritage list —
@@ -794,15 +858,49 @@ pub fn details_from_tags(tags: &[(String, String)]) -> DetailRows {
             // still falls back to the next one (`contact:phone`).
             let value = tag(key)?;
             let value = match *label {
-                // yes/no/limited-style enums: "limited" → "Limited".
+                // `amenity=pharmacy` + `healthcare=pharmacy`: one row says it.
+                "Healthcare" if tag("amenity").as_deref() == Some(value.as_str()) => return None,
+                // OSM values and yes/no/limited-style enums: "estate_agent" → "Estate agent".
                 "Wheelchair access" | "Internet access" | "Outdoor seating" | "Takeaway"
-                | "Vegetarian" | "Vegan" | "Fee" => humanize(&value),
+                | "Vegetarian" | "Vegan" | "Fee" | "Shop" | "Amenity" | "Office" | "Craft"
+                | "Healthcare" | "Tourism" | "Leisure" | "Historic" | "Artwork" | "Land use"
+                | "Shelter" | "Bench" | "Tactile paving" | "Access" | "Religion"
+                | "Denomination" | "Delivery" | "Drive-through" | "Wheelchair toilets"
+                | "Air conditioning" | "Self service" => humanize(&value),
+                "Speciality" => value
+                    .split(';')
+                    .map(|part| humanize(part.trim()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                // `building=yes` only says "a building".
+                "Building" if value == "yes" => return None,
+                "Building" => humanize(&value),
                 "Height" if value.parse::<f64>().is_ok() => format!("{value} m"),
+                "Floor" => floor_label(&value),
+                "Smoking" => smoking_label(&value),
+                "SIRET" => format_siret(&value),
+                "Lines" => value.replace(';', ", "),
                 _ => value,
             };
             seen_labels
                 .insert(*label)
                 .then(|| (label.to_string(), value))
+        }))
+        .chain(TAG_GROUPS.iter().filter_map(|(prefix, label)| {
+            // `payment:cash=yes`, `payment:visa=yes` → "Cash, Visa".
+            let accepted: Vec<String> = tags
+                .iter()
+                .filter(|(k, v)| k.starts_with(prefix) && v != "no")
+                .map(|(k, v)| {
+                    let name = humanize(&k[prefix.len()..]);
+                    if v == "yes" {
+                        name
+                    } else {
+                        format!("{name} ({v})")
+                    }
+                })
+                .collect();
+            (!accepted.is_empty()).then(|| (label.to_string(), accepted.join(", ")))
         }))
         .collect();
 
@@ -810,10 +908,12 @@ pub fn details_from_tags(tags: &[(String, String)]) -> DetailRows {
         .iter()
         .map(|(k, _)| k.to_string())
         .chain(ADDRESS_PARTS.iter().map(|part| format!("addr:{part}")))
+        .chain(SOCIAL_KEYS.iter().map(|(k, _, _)| k.to_string()))
         .collect();
+    let grouped = |k: &str| TAG_GROUPS.iter().any(|(prefix, _)| k.starts_with(prefix));
     let raw: Vec<(String, String)> = tags
         .iter()
-        .filter(|(k, _)| !known.contains(k) && !is_noise_tag(k))
+        .filter(|(k, _)| !known.contains(k) && !grouped(k) && !is_noise_tag(k))
         .cloned()
         .collect();
     if !raw.is_empty() {
@@ -828,6 +928,46 @@ pub fn details_from_tags(tags: &[(String, String)]) -> DetailRows {
     }
 
     (rows, raw)
+}
+
+/// `level` (`"0"`, `"1"`, `"-1"`, `"0;1"`) as a floor: `"Ground floor"`, `"Floor 1"`, `"Basement 1"`.
+fn floor_label(level: &str) -> String {
+    let floor = |level: &str| match level.trim().parse::<f64>() {
+        Ok(0.0) => "Ground floor".to_string(),
+        Ok(n) if n < 0.0 => format!("Basement {}", -n),
+        Ok(n) => format!("Floor {n}"),
+        Err(_) => level.trim().to_string(),
+    };
+    level.split(';').map(floor).collect::<Vec<_>>().join(", ")
+}
+
+/// The OSM `smoking` values (<https://wiki.openstreetmap.org/wiki/Key:smoking>) in words.
+fn smoking_label(value: &str) -> String {
+    match value {
+        "yes" => "Allowed".to_string(),
+        "no" => "Not allowed".to_string(),
+        "outside" => "Outside only".to_string(),
+        "separated" => "In a separate area".to_string(),
+        "isolated" => "In an isolated room".to_string(),
+        "dedicated" => "Smokers' venue".to_string(),
+        other => humanize(other),
+    }
+}
+
+/// A SIRET (14 digits: the SIREN company number, then the establishment's) as written in
+/// France: `"123 456 789 00012"`.
+fn format_siret(value: &str) -> String {
+    let digits: String = value.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() != 14 {
+        return value.to_string();
+    }
+    format!(
+        "{} {} {} {}",
+        &digits[..3],
+        &digits[3..6],
+        &digits[6..9],
+        &digits[9..]
+    )
 }
 
 /// Everything derived from `tags` alone, with no network: [`details_from_tags`]'s rows, the
@@ -856,6 +996,33 @@ pub fn local_details(tags: &[(String, String)]) -> EnrichedDetails {
             "Wikipedia".to_string(),
             "Open Wikipedia".to_string(),
             wikipedia::article_url(&lang, &title),
+        ));
+    }
+    for (key, label, base) in SOCIAL_KEYS {
+        let Some(value) = tag(key) else { continue };
+        let url = if value.starts_with("http") {
+            value.clone()
+        } else {
+            format!("{base}{}", value.trim_start_matches('@'))
+        };
+        if !links.iter().any(|(existing, _, _)| existing == label) {
+            links.push((label.to_string(), value, url));
+        }
+    }
+    // France's official business register entry for the establishment.
+    if let Some(siret) = tag("ref:FR:SIRET")
+        .map(|siret| {
+            siret
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .filter(|siret| siret.len() == 14)
+    {
+        links.push((
+            "Company record".to_string(),
+            "Annuaire des entreprises".to_string(),
+            format!("https://annuaire-entreprises.data.gouv.fr/etablissement/{siret}"),
         ));
     }
     if is_monument_historique(tags) {
@@ -1081,6 +1248,44 @@ mod tests {
             assert!(is_noise_tag(key), "{key}");
         }
         assert!(!is_noise_tag("architect"));
+    }
+
+    #[test]
+    fn kinds_and_enums_read_as_words() {
+        let (rows, raw) = details_from_tags(&tags(&[
+            ("office", "estate_agent"),
+            ("building", "yes"),
+            ("level", "-1"),
+            ("smoking", "outside"),
+            ("ref:FR:SIRET", "12345678900012"),
+            ("check_date", "2025-06-01"),
+            ("amenity", "pharmacy"),
+            ("healthcare", "pharmacy"),
+        ]));
+        assert_eq!(
+            rows,
+            tags(&[
+                ("Amenity", "Pharmacy"),
+                ("Office", "Estate agent"),
+                ("Floor", "Basement 1"),
+                ("Smoking", "Outside only"),
+                ("SIRET", "123 456 789 00012"),
+                ("Last checked", "2025-06-01"),
+            ])
+        );
+        assert!(raw.is_empty());
+        assert_eq!(floor_label("0;1"), "Ground floor, Floor 1");
+
+        let (rows, raw) = details_from_tags(&tags(&[
+            ("payment:cash", "yes"),
+            ("payment:cheque", "no"),
+            ("payment:visa", "yes"),
+            ("contact:instagram", "lafarine"),
+        ]));
+        assert_eq!(rows, tags(&[("Payment", "Cash, Visa")]));
+        assert!(raw.is_empty());
+        let links = local_details(&tags(&[("contact:instagram", "@lafarine")])).links;
+        assert_eq!(links[0].2, "https://www.instagram.com/lafarine");
     }
 
     #[test]

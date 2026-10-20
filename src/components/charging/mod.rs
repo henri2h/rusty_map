@@ -121,7 +121,11 @@ impl Component for ChargerLayer {
                 let selected = selected_id
                     .and_then(|id| list.iter().position(|charger| charger.id == id))
                     .map(|index| index as u64);
-                map.set_markers(Some(MarkerSet { markers, selected }));
+                map.set_markers(Some(MarkerSet {
+                    markers,
+                    selected,
+                    ..Default::default()
+                }));
             }
         });
 

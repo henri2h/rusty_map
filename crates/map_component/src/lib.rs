@@ -12,7 +12,9 @@ pub mod util;
 
 pub use map_controller::{Insets, MapController};
 pub use map_input::{MapTap, TappedFeature, TappedLine};
-pub use overlay::{MapMarker, MarkerSet, OverlayPath, OverlayStop, RouteOverlay, UserLocation};
+pub use overlay::{
+    MapMarker, MarkerGlyph, MarkerSet, OverlayPath, OverlayStop, RouteOverlay, UserLocation,
+};
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -46,6 +48,7 @@ pub struct MapComponent {
     /// Fired when a tap lands on empty map. Same not-compared reasoning as `on_place_tapped`.
     on_map_tapped: Option<EventHandler<MapTap>>,
     on_marker_tapped: Option<EventHandler<u64>>,
+    on_pin_tapped: Option<EventHandler<u64>>,
     /// Fired when a tap hits a rail/transit line — only while the style keeps line geometry
     /// for picking (`StyleSpec::pick_transit_lines`, the transit overlay). Same not-compared
     /// reasoning as `on_place_tapped`.
@@ -71,6 +74,7 @@ impl MapComponent {
             on_place_tapped: None,
             on_map_tapped: None,
             on_marker_tapped: None,
+            on_pin_tapped: None,
             on_line_tapped: None,
         }
     }
@@ -83,6 +87,12 @@ impl MapComponent {
     /// Fired with a [`MarkerSet`] marker's id when a tap lands on it (markers win over labels).
     pub fn on_marker_tapped(mut self, handler: impl FnMut(u64) + 'static) -> Self {
         self.on_marker_tapped = Some(EventHandler::new(handler));
+        self
+    }
+
+    /// Fired with a [`MapController::pins`] marker's id when a tap lands on it.
+    pub fn on_pin_tapped(mut self, handler: impl FnMut(u64) + 'static) -> Self {
+        self.on_pin_tapped = Some(EventHandler::new(handler));
         self
     }
 
@@ -123,6 +133,7 @@ impl Component for MapComponent {
         let marker_world_state = self.controller.marker_world;
         let route_overlay_state = self.controller.route_overlay;
         let markers_state = self.controller.markers;
+        let pins_state = self.controller.pins;
         let user_location_state = self.controller.user_location;
         let cursor = *self.controller.cursor.read();
         let style = self.controller.style.clone();
@@ -208,6 +219,7 @@ impl Component for MapComponent {
             let base_style = base_style.clone();
             let platform = platform.clone();
             let sheet_slot = sprite_sheet.clone();
+            let mut sheet_state = self.controller.sprites;
             spawn(async move {
                 let loaded = Arc::new(load_style().await);
                 *base_style.borrow_mut() = loaded.clone();
@@ -222,7 +234,9 @@ impl Component for MapComponent {
                 match sprites::load_sprites(&sprite_url).await {
                     Ok(sheet) => {
                         log::info!("[sprites] loaded {} icons", sheet.index.len());
-                        *sheet_slot.borrow_mut() = Some(Rc::new(sheet));
+                        let sheet = Rc::new(sheet);
+                        *sheet_slot.borrow_mut() = Some(sheet.clone());
+                        sheet_state.set(Some(sheet));
                         platform.send(UserEvent::RequestRedraw);
                     }
                     Err(err) => log::warn!("[sprites] load failed, no icons: {err:?}"),
@@ -247,6 +261,8 @@ impl Component for MapComponent {
             on_map_tapped: self.on_map_tapped.clone(),
             markers: markers_state,
             on_marker_tapped: self.on_marker_tapped.clone(),
+            pins: pins_state,
+            on_pin_tapped: self.on_pin_tapped.clone(),
             on_line_tapped: self.on_line_tapped.clone(),
         };
 
@@ -278,6 +294,7 @@ impl Component for MapComponent {
                         let marker_world = *marker_world_state.peek();
                         let route_overlay = route_overlay_state.peek().clone();
                         let markers = markers_state.peek().clone();
+                        let pins = pins_state.peek().clone();
                         let user_location = *user_location_state.peek();
                         let style_now = style.borrow().clone();
 
@@ -298,7 +315,7 @@ impl Component for MapComponent {
                         );
                         // Over everything, labels included: markers are what the user is
                         // looking for when they're shown.
-                        if let Some(markers) = markers {
+                        for markers in [pins, markers].into_iter().flatten() {
                             let viewport = util::viewport::Viewport::new(
                                 *center.peek(),
                                 *zoom.peek(),

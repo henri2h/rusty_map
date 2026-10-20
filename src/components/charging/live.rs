@@ -167,7 +167,7 @@ impl Component for ChargerLive {
                 rect()
                     .cursor(CursorIcon::Pointer)
                     .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
-                    .on_press(|_: Event<PressEventData>| Platform::get().open_url(api::SOURCE_URL))
+                    .on_press(|_: Event<PressEventData>| crate::mobile::open_url(api::SOURCE_URL))
                     .child(
                         label()
                             .text("Live data: QualiCharge")

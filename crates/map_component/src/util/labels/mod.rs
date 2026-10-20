@@ -249,11 +249,7 @@ impl<'a> SpriteResolver<'a> {
         *self
             .memo
             .entry((poi.kind.as_str(), poi.class.as_deref()))
-            .or_insert_with(|| {
-                sheet
-                    .resolve(&poi.kind)
-                    .or_else(|| poi.class.as_deref().and_then(|class| sheet.resolve(class)))
-            })
+            .or_insert_with(|| sheet.resolve_poi(&poi.kind, poi.class.as_deref()))
     }
 }
 

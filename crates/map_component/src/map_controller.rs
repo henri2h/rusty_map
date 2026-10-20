@@ -8,6 +8,7 @@ use crate::{
     style::{self, StyleSpec},
     util::{
         renderer::TILE_SIZE,
+        sprites::SpriteSheet,
         viewport::{Viewport, lonlat_to_center, max_zoom_ui, world_to_lonlat},
     },
 };
@@ -43,12 +44,19 @@ pub struct MapController {
     pub route_overlay: State<Option<Rc<RouteOverlay>>>,
     /// Tappable point markers drawn over the map (see `overlay::MarkerSet`).
     pub markers: State<Option<Rc<MarkerSet>>>,
+    /// Search results drawn over the map, under [`Self::markers`] (see
+    /// `MapComponent::on_pin_tapped`).
+    pub pins: State<Option<Rc<MarkerSet>>>,
     /// The device's position (see [`UserLocation`]); `None` draws nothing.
     pub user_location: State<Option<UserLocation>>,
 
     /// Mouse cursor over the map, e.g. a crosshair while the host waits for the user to pick a
     /// point. `None` keeps the default.
     pub cursor: State<Option<CursorIcon>>,
+
+    /// The style's POI icon sheet once loaded, so host UI can show the same icon the map draws
+    /// for a kind of place (see [`SpriteSheet::icon_png`]).
+    pub sprites: State<Option<Rc<SpriteSheet>>>,
 
     pub style: Rc<RefCell<Arc<StyleSpec>>>,
     pub platform: PlatformWindow,
@@ -63,8 +71,10 @@ impl PartialEq for MapController {
             && self.transit == other.transit
             && self.route_overlay == other.route_overlay
             && self.markers == other.markers
+            && self.pins == other.pins
             && self.user_location == other.user_location
             && self.cursor == other.cursor
+            && self.sprites == other.sprites
             && Rc::ptr_eq(&self.style, &other.style)
     }
 }
@@ -82,8 +92,10 @@ impl MapController {
         let transit = use_state(|| false);
         let route_overlay = use_state::<Option<Rc<RouteOverlay>>>(|| None);
         let markers = use_state::<Option<Rc<MarkerSet>>>(|| None);
+        let pins = use_state::<Option<Rc<MarkerSet>>>(|| None);
         let cursor = use_state::<Option<CursorIcon>>(|| None);
         let user_location = use_state::<Option<UserLocation>>(|| None);
+        let sprites = use_state::<Option<Rc<SpriteSheet>>>(|| None);
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
 
@@ -95,8 +107,10 @@ impl MapController {
             transit,
             route_overlay,
             markers,
+            pins,
             user_location,
             cursor,
+            sprites,
             style,
             platform,
         }
@@ -122,6 +136,14 @@ impl MapController {
     pub fn set_markers(&mut self, markers: Option<MarkerSet>) {
         self.markers.set(markers.map(Rc::new));
         self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Replaces the drawn search result pins and repaints, unless unchanged.
+    pub fn set_pins(&mut self, pins: Option<MarkerSet>) {
+        if self.pins.peek().as_deref() != pins.as_ref() {
+            self.pins.set(pins.map(Rc::new));
+            self.platform.send(UserEvent::RequestRedraw);
+        }
     }
 
     /// Moves and zooms the view so the world-coordinate box `bounds` fills the part of the map
@@ -156,5 +178,20 @@ impl MapController {
             .set(CursorPoint::new(raw.x - offset.x, raw.y - offset.y));
         self.zoom.set(zoom);
         self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// The lon/lat box the map currently shows (less `insets`, e.g. a panel covering its
+    /// side), as `((min_lon, min_lat), (max_lon, max_lat))`.
+    pub fn visible_lonlat_bounds(&self, insets: Insets) -> ((f64, f64), (f64, f64)) {
+        let max_real_zoom = self.style.borrow().max_real_zoom;
+        let area = self.viewport_size.peek().size;
+        let viewport = Viewport::new(*self.center.peek(), *self.zoom.peek(), max_real_zoom);
+        let (left, top) = viewport.screen_to_world(insets.left, insets.top);
+        let (right, bottom) = viewport.screen_to_world(
+            (area.width - insets.right).max(insets.left + 1.0),
+            (area.height - insets.bottom).max(insets.top + 1.0),
+        );
+        // World y grows southwards.
+        (world_to_lonlat(left, bottom), world_to_lonlat(right, top))
     }
 }

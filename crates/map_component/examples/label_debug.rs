@@ -34,6 +34,7 @@ async fn main() {
         layers: parsed.layers,
         tile_url_template: "https://openmaptiles.data.gouv.fr/data/planet-vector/{z}/{x}/{y}.pbf"
             .to_string(),
+        fallback_tile_url_template: None,
         sprite_url: None,
         min_zoom: 0.0,
         max_real_zoom: 14,

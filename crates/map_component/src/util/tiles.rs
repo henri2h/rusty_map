@@ -77,7 +77,22 @@ pub async fn fetch_tile(key: TileKey, style: Arc<StyleSpec>) -> Result<CompiledT
 
 async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<CompiledTile, FetchError> {
     let io_start = std::time::Instant::now();
-    let (data, from_disk) = fetch_tile_io(key, &style.tile_url_template).await?;
+    let mut template = style.tile_url_for(key).to_string();
+    let (data, from_disk) = match fetch_tile_io(key, &template).await {
+        // The primary source down or missing this tile: the fallback has the same schema.
+        Err(err) if template == style.tile_url_template => {
+            match &style.fallback_tile_url_template {
+                Some(fallback) => {
+                    let (z, x, y) = key;
+                    log::debug!("[fetch {z}/{x}/{y}] {err:?}, trying the fallback source");
+                    template = fallback.clone();
+                    fetch_tile_io(key, &template).await?
+                }
+                None => return Err(err),
+            }
+        }
+        result => result?,
+    };
     let io_ms = io_start.elapsed().as_millis();
     if io_ms > 1 {
         let (z, x, y) = key;
@@ -87,10 +102,10 @@ async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<Compile
         // A corrupt cached copy (e.g. a write cut short) would otherwise fail this tile on every
         // run, forever: drop it and fetch the tile again.
         Err(FetchError::InvalidData) if from_disk => {
-            if let Some(path) = tile_cache_path(&style.tile_url_template, key) {
+            if let Some(path) = tile_cache_path(&template, key) {
                 let _ = tokio::fs::remove_file(&path).await;
             }
-            let (data, _) = fetch_tile_io(key, &style.tile_url_template).await?;
+            let (data, _) = fetch_tile_io(key, &template).await?;
             decode_tile(data, style, key).await
         }
         result => result,

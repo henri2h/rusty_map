@@ -241,6 +241,19 @@ pub fn share(subject: &str, text: &str) -> bool {
     }
 }
 
+/// Opens `url` in the app that handles it: the browser, or for `tel:` the phone app with the
+/// number dialled (Android) — freya's own `Platform::open_url` runs `xdg-open`, which Android
+/// doesn't have.
+pub fn open_url(url: impl Into<String>) {
+    let url = url.into();
+    #[cfg(target_os = "android")]
+    if let Err(e) = call_activity("openUrl", "(Ljava/lang/String;)V", &[Arg::Str(&url)]) {
+        log::warn!("open_url({url}) failed: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    Platform::get().open_url(url);
+}
+
 /// Keeps the screen on (Android), e.g. while guiding a walk. No-op on desktop.
 pub fn keep_screen_on(on: bool) {
     #[cfg(target_os = "android")]

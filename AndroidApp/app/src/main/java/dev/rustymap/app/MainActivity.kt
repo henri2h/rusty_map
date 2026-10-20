@@ -3,12 +3,14 @@ package dev.rustymap.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.NativeActivity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.location.LocationRequest
+import android.net.Uri
 import android.os.Bundle
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
@@ -126,6 +128,22 @@ class MainActivity : NativeActivity() {
                 putExtra(Intent.EXTRA_TEXT, text)
             }
             startActivity(Intent.createChooser(send, null))
+        }
+    }
+
+    /**
+     * Called from Rust (`mobile::open_url`) on any thread: `url` in the app that handles it — the
+     * browser, the dialer (`tel:`, prefilled, not called) or the mail app (`mailto:`).
+     */
+    @Suppress("unused")
+    fun openUrl(url: String) {
+        runOnUiThread {
+            val action = if (url.startsWith("tel:")) Intent.ACTION_DIAL else Intent.ACTION_VIEW
+            try {
+                startActivity(Intent(action, Uri.parse(url)))
+            } catch (e: ActivityNotFoundException) {
+                System.err.println("rusty_map: no app opens $url")
+            }
         }
     }
 

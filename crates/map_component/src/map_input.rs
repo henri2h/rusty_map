@@ -90,6 +90,9 @@ pub struct MapInputState {
     /// Host markers (see `overlay::MarkerSet`), hit-tested before labels.
     pub markers: State<Option<Rc<crate::overlay::MarkerSet>>>,
     pub on_marker_tapped: Option<EventHandler<u64>>,
+    /// Search result pins (see `MapController::pins`), hit-tested after markers.
+    pub pins: State<Option<Rc<crate::overlay::MarkerSet>>>,
+    pub on_pin_tapped: Option<EventHandler<u64>>,
     /// Fired when a tap hits a rail/transit line (only while the style keeps their geometry,
     /// see `StyleSpec::pick_transit_lines`).
     pub on_line_tapped: Option<EventHandler<TappedLine>>,
@@ -209,6 +212,8 @@ pub fn build_on_global_pointer_up(
     let on_line_tapped = s.on_line_tapped.clone();
     let markers = s.markers;
     let on_marker_tapped = s.on_marker_tapped.clone();
+    let pins = s.pins;
+    let on_pin_tapped = s.on_pin_tapped.clone();
     let tile_cache = s.tile_cache.clone();
     let viewport_size = s.viewport_size;
     move |event: Event<PointerEventData>| {
@@ -258,7 +263,10 @@ pub fn build_on_global_pointer_up(
         }
 
         // Markers sit on top of everything, so they're hit first.
-        if let (Some(handler), Some(set)) = (&on_marker_tapped, markers.peek().clone()) {
+        for (handler, set) in [(&on_marker_tapped, markers), (&on_pin_tapped, pins)] {
+            let (Some(handler), Some(set)) = (handler, set.peek().clone()) else {
+                continue;
+            };
             let viewport =
                 Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
             if let Some(id) =

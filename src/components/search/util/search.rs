@@ -24,6 +24,9 @@ pub struct SearchResult {
     /// Photon's `osm_value` (falling back to `osm_key`), e.g. `restaurant`, `street` — shown as
     /// a subtitle.
     pub category: String,
+    /// Photon's `osm_key` (e.g. `amenity`, `shop`, `highway`): the coarser class `category`
+    /// belongs to, for picking an icon when there's none for `category` itself.
+    pub osm_key: String,
     /// OSM element type, single-letter form (`N`/`W`/`R`) — [`fetch_osm_element`] accepts either
     /// this or the full word, so it's kept as Photon gives it rather than re-normalized.
     pub osm_type: String,
@@ -71,7 +74,179 @@ async fn search_io(
         params.push(("lon", lon.to_string()));
         params.push(("lat", lat.to_string()));
     }
+    photon(params).await
+}
 
+/// Quick addresses and places from IGN's Géoplateforme geocoder (France only, no key): it answers
+/// in a fraction of a second where Photon's public instance often takes several, so the dropdown
+/// shows these first and Photon's (OSM, with ids for the full details) replace them once in.
+pub async fn search_ign(
+    query: String,
+    bias: Option<(f64, f64)>,
+) -> Result<Vec<SearchResult>, FetchError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    background_runtime().spawn(async move {
+        let _ = tx.send(search_ign_io(query, bias).await);
+    });
+    rx.await.unwrap_or(Err(FetchError::TaskFailed))
+}
+
+async fn search_ign_io(
+    query: String,
+    bias: Option<(f64, f64)>,
+) -> Result<Vec<SearchResult>, FetchError> {
+    let mut params = vec![
+        ("q", query),
+        ("index", "address,poi".to_string()),
+        ("limit", "8".to_string()),
+    ];
+    if let Some((lon, lat)) = bias {
+        params.push(("lon", lon.to_string()));
+        params.push(("lat", lat.to_string()));
+    }
+    log::trace!("[http] GET https://data.geopf.fr/geocodage/search {params:?}");
+    let response = client()
+        .get("https://data.geopf.fr/geocodage/search")
+        .query(&params)
+        .header(reqwest::header::USER_AGENT, "rusty_map/1.0")
+        .send()
+        .await
+        .map_err(FetchError::Network)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FetchError::Http(status.as_u16()));
+    }
+    let text = response.text().await.map_err(FetchError::Network)?;
+    let parsed: Value = serde_json::from_str(&text).map_err(|_| FetchError::InvalidData)?;
+    Ok(parsed["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(ign_result)
+        .collect())
+}
+
+/// One IGN geocoder feature: an address (`name`/`label` strings, `type` `street`/`housenumber`/
+/// …) or a BD TOPO place (`name`/`category` lists).
+fn ign_result(feature: &Value) -> Option<SearchResult> {
+    let lon = feature["geometry"]["coordinates"][0].as_f64()?;
+    let lat = feature["geometry"]["coordinates"][1].as_f64()?;
+    let p = &feature["properties"];
+    let first = |value: &Value| {
+        value
+            .as_str()
+            .or_else(|| value[0].as_str())
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let name = first(&p["name"]).unwrap_or_default();
+    let city = first(&p["city"]).unwrap_or_default();
+    let display_name = match p["label"].as_str() {
+        Some(label) => label.split_whitespace().collect::<Vec<_>>().join(" "),
+        None if !city.is_empty() => format!("{name}, {city}"),
+        None => name.clone(),
+    };
+    let category = first(&p["category"])
+        .or_else(|| first(&p["type"]))
+        .unwrap_or_default();
+    Some(SearchResult {
+        name,
+        display_name,
+        lat,
+        lon,
+        category,
+        osm_key: String::new(),
+        // No OSM element: the drawer shows the address and coordinates only.
+        osm_type: String::new(),
+        osm_id: 0,
+    })
+}
+
+/// Places of the given kinds (`key.value` OSM tags, e.g. `amenity.restaurant`) within `bounds`
+/// (`((min_lon, min_lat), (max_lon, max_lat))`, the visible map), nearest to `center` first —
+/// Photon's `include` category filter, which needs no query text. Widened to a `center`-biased
+/// search when nothing lies within `bounds`.
+pub async fn search_category(
+    tags: &'static [&'static str],
+    bounds: ((f64, f64), (f64, f64)),
+    center: (f64, f64),
+) -> Result<Vec<SearchResult>, FetchError> {
+    let include = tags
+        .iter()
+        .map(|tag| format!("osm.{tag}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    search_area(vec![("include", include)], bounds, center).await
+}
+
+/// Every match for `query` within `bounds` (the visible map), nearest to `center` first — what
+/// pressing Enter in the search box lists, rather than the handful of best matches anywhere.
+/// Widened to a `center`-biased search when nothing lies within `bounds`.
+pub async fn search_in_area(
+    query: String,
+    bounds: ((f64, f64), (f64, f64)),
+    center: (f64, f64),
+) -> Result<Vec<SearchResult>, FetchError> {
+    search_area(vec![("q", query)], bounds, center).await
+}
+
+async fn search_area(
+    filter: Vec<(&'static str, String)>,
+    bounds: ((f64, f64), (f64, f64)),
+    center: (f64, f64),
+) -> Result<Vec<SearchResult>, FetchError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    background_runtime().spawn(async move {
+        let _ = tx.send(search_area_io(filter, bounds, center).await);
+    });
+
+    rx.await.unwrap_or(Err(FetchError::TaskFailed))
+}
+
+async fn search_area_io(
+    mut params: Vec<(&'static str, String)>,
+    ((min_lon, min_lat), (max_lon, max_lat)): ((f64, f64), (f64, f64)),
+    (lon, lat): (f64, f64),
+) -> Result<Vec<SearchResult>, FetchError> {
+    params.push(("limit", "30".to_string()));
+    params.push(("lang", "fr".to_string()));
+    let mut in_view = params.clone();
+    in_view.push(("bbox", format!("{min_lon},{min_lat},{max_lon},{max_lat}")));
+    let mut results = photon(in_view).await?;
+    if results.is_empty() {
+        let mut nearby = params;
+        nearby.push(("lon", lon.to_string()));
+        nearby.push(("lat", lat.to_string()));
+        results = photon(nearby).await?;
+    }
+    // Photon ranks by importance, not distance.
+    results.sort_by(|a, b| {
+        distance_m(lat, lon, a.lat, a.lon).total_cmp(&distance_m(lat, lon, b.lat, b.lon))
+    });
+    Ok(results)
+}
+
+/// Great-circle distance in meters.
+pub fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = p2 - p1;
+    let dl = (lon2 - lon1).to_radians();
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 6_371_000.0 * a.sqrt().asin()
+}
+
+/// `"350 m"`, `"1.2 km"`, `"14 km"`.
+pub fn format_distance(meters: f64) -> String {
+    if meters < 1_000.0 {
+        format!("{} m", (meters / 10.0).round() as i64 * 10)
+    } else if meters < 10_000.0 {
+        format!("{:.1} km", meters / 1_000.0)
+    } else {
+        format!("{} km", (meters / 1_000.0).round() as i64)
+    }
+}
+
+async fn photon(params: Vec<(&str, String)>) -> Result<Vec<SearchResult>, FetchError> {
     log::trace!("[http] GET https://photon.komoot.io/api/ {params:?}");
     let response = client()
         .get("https://photon.komoot.io/api/")
@@ -150,7 +325,8 @@ fn to_result(feature: PhotonFeature) -> SearchResult {
         display_name,
         lat,
         lon,
-        category: p.osm_value.or(p.osm_key).unwrap_or_default(),
+        category: p.osm_value.or(p.osm_key.clone()).unwrap_or_default(),
+        osm_key: p.osm_key.unwrap_or_default(),
         osm_type: p.osm_type.unwrap_or_default(),
         osm_id: p.osm_id.unwrap_or_default(),
     }
@@ -475,6 +651,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(address_from_reverse(&parsed).unwrap().title, "Ormoy");
+    }
+
+    #[test]
+    fn formats_distances() {
+        assert_eq!(format_distance(343.0), "340 m");
+        assert_eq!(format_distance(1_234.0), "1.2 km");
+        assert_eq!(format_distance(14_400.0), "14 km");
+        let paris_lyon = distance_m(48.8566, 2.3522, 45.764, 4.8357);
+        assert!((390_000.0..395_000.0).contains(&paris_lyon), "{paris_lyon}");
+    }
+
+    #[test]
+    fn reads_ign_addresses_and_places() {
+        let street: Value = serde_json::from_str(
+            r#"{"geometry": {"coordinates": [5.449173, 43.526816]}, "properties": {"label":
+                "Cours  Mirabeau 13100 Aix-en-Provence", "name": "Cours  Mirabeau", "type": "street",
+                "city": "Aix-en-Provence"}}"#,
+        )
+        .unwrap();
+        let street = ign_result(&street).unwrap();
+        assert_eq!(street.name, "Cours Mirabeau");
+        assert_eq!(street.display_name, "Cours Mirabeau 13100 Aix-en-Provence");
+        assert_eq!(street.category, "street");
+        let place: Value = serde_json::from_str(
+            r#"{"geometry": {"coordinates": [5.4, 43.5]}, "properties": {"name": ["Gare"],
+                "category": ["gare"], "city": ["Aix-en-Provence"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ign_result(&place).unwrap().display_name,
+            "Gare, Aix-en-Provence"
+        );
     }
 
     #[test]

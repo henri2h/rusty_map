@@ -566,7 +566,7 @@ impl Component for Itineraries {
                 rect()
                     .cursor(CursorIcon::Pointer)
                     .margin((8.0f32, 0.0f32, 16.0f32, 0.0f32))
-                    .on_press(|_: Event<PressEventData>| Platform::get().open_url(api::SOURCES_URL))
+                    .on_press(|_: Event<PressEventData>| crate::mobile::open_url(api::SOURCES_URL))
                     .child(
                         label()
                             .text("Routes: Transitous · data sources")

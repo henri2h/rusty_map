@@ -2,8 +2,12 @@
 //! converts its SDF-encoded glyphs into a crisp, pre-tinted RGBA atlas once at load — the paint
 //! loop then just crops and blits per icon.
 
+use std::cell::RefCell;
+
 use bytes::Bytes;
-use freya::engine::prelude::{ColorType, Data, Image, ImageInfo, Rect, raster_from_data};
+use freya::engine::prelude::{
+    ColorType, Data, EncodedImageFormat, Image, ImageInfo, Rect, raster_from_data,
+};
 use rustc_hash::FxHashMap;
 
 use super::tiles::{FetchError, fetch_bytes_cached, fetch_text_cached};
@@ -15,6 +19,8 @@ pub struct SpriteSheet {
     pub image: Image,
     /// sprite name (e.g. `icon-bakery`) → source rect in `image`.
     pub index: FxHashMap<String, Rect>,
+    /// sprite name → its icon cut out of `image` as a PNG (see [`Self::icon_png`]).
+    pngs: RefCell<FxHashMap<String, Option<Bytes>>>,
 }
 
 impl SpriteSheet {
@@ -37,7 +43,128 @@ impl SpriteSheet {
         .find_map(|name| self.index.get_key_value(&name))
         .map(|(name, rect)| (name.as_str(), *rect))
     }
+
+    /// The sprite for a POI of `kind` (OSM tag value) in `class` (its coarser group): its own
+    /// sprite, else a close one the sheet has (see [`SPRITE_ALIASES`]), else the class's, else a
+    /// generic dot — so no POI goes without an icon just because the sheet lacks its kind.
+    pub fn resolve_poi(&self, kind: &str, class: Option<&str>) -> Option<(&str, Rect)> {
+        self.resolve_poi_kind(kind, class)
+            .or_else(|| FALLBACK_SPRITES.iter().find_map(|name| self.resolve(name)))
+    }
+
+    /// [`Self::resolve_poi`] without the generic dot.
+    fn resolve_poi_kind(&self, kind: &str, class: Option<&str>) -> Option<(&str, Rect)> {
+        let alias = |name: &str| {
+            SPRITE_ALIASES
+                .iter()
+                .find(|(kinds, _)| kinds.contains(&name))
+                .and_then(|(_, sprite)| self.resolve(sprite))
+        };
+        self.resolve(kind)
+            .or_else(|| alias(kind))
+            .or_else(|| class.and_then(|class| self.resolve(class).or_else(|| alias(class))))
+    }
+
+    /// The icon the map draws for a POI of this `kind` (falling back to its coarser `class`, as
+    /// the label pass does), as a PNG for UI outside the map canvas — a search result row, say —
+    /// plus the sprite name to key an image cache by. Cut out once per sprite, then memoized.
+    /// `None` rather than the generic dot: UI has better generic icons of its own.
+    pub fn icon_png(&self, kind: &str, class: Option<&str>) -> Option<(String, Bytes)> {
+        let (name, src) = self.resolve_poi_kind(kind, class)?;
+        let png = self
+            .pngs
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let icon = self
+                    .image
+                    .make_subset(None, src.round(), Default::default())?;
+                let data = icon.encode(None, EncodedImageFormat::PNG, None)?;
+                Some(Bytes::copy_from_slice(data.as_bytes()))
+            })
+            .clone()?;
+        Some((name.to_string(), png))
+    }
 }
+
+/// POI kinds (OSM values, or OpenMapTiles classes) drawn with another kind's sprite when the sheet
+/// has none of their own — named as [`SpriteSheet::resolve`] takes them (osm-bright's Maki set).
+const SPRITE_ALIASES: &[(&[&str], &str)] = &[
+    (
+        &[
+            "convenience",
+            "supermarket",
+            "greengrocer",
+            "deli",
+            "butcher",
+            "cheese",
+            "farm",
+        ],
+        "grocery",
+    ),
+    (&["pastry", "confectionery", "chocolate"], "bakery"),
+    (&["pub", "biergarten", "nightclub"], "bar"),
+    (&["wine", "beverages"], "alcohol_shop"),
+    (&["food_court"], "fast_food"),
+    (
+        &["clothes", "shoes", "boutique", "fashion"],
+        "clothing_store",
+    ),
+    (&["books", "stationery", "newsagent"], "library"),
+    (&["doctors", "clinic", "healthcare"], "doctor"),
+    (&["chemist"], "pharmacy"),
+    (
+        &[
+            "office",
+            "estate_agent",
+            "insurance",
+            "lawyer",
+            "accountant",
+            "company",
+            "employment_agency",
+            "travel_agency",
+            "notary",
+        ],
+        "suitcase",
+    ),
+    (
+        &[
+            "hotel",
+            "hostel",
+            "motel",
+            "guest_house",
+            "apartment",
+            "chalet",
+        ],
+        "lodging",
+    ),
+    (
+        &[
+            "car",
+            "car_repair",
+            "car_parts",
+            "car_rental",
+            "car_wash",
+            "tyres",
+            "motorcycle",
+        ],
+        "car",
+    ),
+    (&["post_box", "post_office", "parcel_locker"], "post"),
+    (&["bus_stop", "bus_station"], "bus"),
+    (&["artwork", "arts_centre", "gallery"], "art_gallery"),
+    (&["memorial", "monument", "statue"], "monument"),
+    (&["toilets"], "toilet"),
+    (&["fountain", "water_point"], "drinking_water"),
+    (&["townhall"], "town_hall"),
+    (&["kindergarten", "university"], "school"),
+    (&["sports_centre", "fitness_centre"], "pitch"),
+    (&["swimming_pool"], "swimming"),
+    (&["tourism", "viewpoint", "information"], "information"),
+];
+
+/// Last resort when a POI's kind, aliases and class all lack a sprite.
+const FALLBACK_SPRITES: &[&str] = &["circle", "marker", "dot"];
 
 /// Fetches and builds the sprite sheet for `base_url` (the style JSON's `sprite` field;
 /// `.json`/`.png` suffixes select index and atlas). Runs its decode/convert work inline — call
@@ -49,7 +176,11 @@ pub async fn load_sprites(base_url: &str) -> Result<SpriteSheet, FetchError> {
     let index = parse_index(&index_json).ok_or(FetchError::InvalidData)?;
     let image = build_atlas(&png).ok_or(FetchError::InvalidData)?;
 
-    Ok(SpriteSheet { image, index })
+    Ok(SpriteSheet {
+        image,
+        index,
+        pngs: RefCell::default(),
+    })
 }
 
 fn parse_index(json: &str) -> Option<FxHashMap<String, Rect>> {
@@ -107,4 +238,37 @@ fn build_atlas(png: &Bytes) -> Option<Image> {
 
     let info = ImageInfo::new_n32_premul((width, height), None);
     raster_from_data(&info, Data::new_copy(&out), (width * 4) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_png_cuts_out_the_kinds_sprite() {
+        let mut surface = freya::engine::prelude::raster_n32_premul((64, 32)).unwrap();
+        let mut index = FxHashMap::default();
+        index.insert(
+            "icon-cafe".to_string(),
+            Rect::from_xywh(32.0, 0.0, 32.0, 32.0),
+        );
+        index.insert("shop_11".to_string(), Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
+        let sheet = SpriteSheet {
+            image: surface.image_snapshot(),
+            index,
+            pngs: RefCell::default(),
+        };
+
+        let (name, png) = sheet.icon_png("cafe", None).unwrap();
+        assert_eq!(name, "icon-cafe");
+        let decoded = Image::from_encoded(Data::new_copy(&png)).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (32, 32));
+
+        // Unknown kind: falls back to the class's sprite.
+        assert_eq!(
+            sheet.icon_png("tobacco", Some("shop")).unwrap().0,
+            "shop_11"
+        );
+        assert!(sheet.icon_png("tobacco", None).is_none());
+    }
 }

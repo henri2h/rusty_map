@@ -21,6 +21,10 @@ pub struct StyleSpec {
     /// Vector tile URL, with `{z}`/`{x}`/`{y}` placeholders, resolved from the style JSON's
     /// `sources` (either an inline `tiles` template or a further-fetched TileJSON's `tiles`).
     pub tile_url_template: String,
+    /// Same-schema whole-planet source for tiles outside [`Self::tile_url_template`]'s coverage
+    /// (the app's own tiles are France only, see `util::coverage`), or when it fails. `None`:
+    /// [`Self::tile_url_template`] covers everything.
+    pub fallback_tile_url_template: Option<String>,
     /// Base sprite URL from the style JSON's `sprite` field (`.json`/`.png` suffixes select
     /// index/atlas), if any.
     pub sprite_url: Option<String>,
@@ -38,6 +42,17 @@ pub struct StyleSpec {
     /// Keep rail/transit line geometry per feature so a tap can hit-test it (see
     /// `CompiledTile::transit_lines`). Off by default — it costs memory per tile.
     pub pick_transit_lines: bool,
+}
+
+impl StyleSpec {
+    /// The tile URL template to fetch `key` from: the primary source where it has data, else
+    /// the fallback (see [`Self::fallback_tile_url_template`]).
+    pub fn tile_url_for(&self, key: crate::util::tiles::TileKey) -> &str {
+        match &self.fallback_tile_url_template {
+            Some(fallback) if !crate::util::coverage::in_own_coverage(key) => fallback,
+            _ => &self.tile_url_template,
+        }
+    }
 }
 
 #[derive(Clone)]

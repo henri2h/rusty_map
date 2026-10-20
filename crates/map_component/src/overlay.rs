@@ -225,6 +225,18 @@ pub struct MarkerSet {
     pub markers: Vec<MapMarker>,
     /// The marker shown as selected (larger), by [`MapMarker::id`].
     pub selected: Option<u64>,
+    /// What up-close markers carry inside.
+    pub glyph: MarkerGlyph,
+}
+
+/// The symbol inside a marker badge once zoomed in (see [`MARKER_GLYPH_ZOOM`]).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum MarkerGlyph {
+    /// A lightning bolt: EV chargers.
+    #[default]
+    Bolt,
+    /// A white dot: search results.
+    Dot,
 }
 
 #[derive(Clone, PartialEq)]
@@ -304,7 +316,10 @@ pub(crate) fn draw_markers(
         canvas.draw_circle(center, radius + if radius > 4.0 { 2.0 } else { 1.0 }, &fill);
         fill.set_color(SkColor::from(marker.color));
         canvas.draw_circle(center, radius, &fill);
-        if zoom >= MARKER_GLYPH_ZOOM {
+        if zoom >= MARKER_GLYPH_ZOOM && set.glyph == MarkerGlyph::Dot {
+            fill.set_color(SkColor::WHITE);
+            canvas.draw_circle(center, radius * 0.38, &fill);
+        } else if zoom >= MARKER_GLYPH_ZOOM {
             // A lightning bolt, in a unit box scaled to the badge.
             let s = radius * 0.62;
             let (cx, cy) = center;
