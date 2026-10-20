@@ -442,7 +442,19 @@ impl Component for SearchPanel {
         let content: Vec<Element> = if planner_open {
             vec![Planner {}.into_element()]
         } else {
-            let mut content = vec![input.into_element()];
+            // On a phone the search box would clip a long name: the sheet shows the place's own
+            // header instead, its ✕ closing the place like the box's.
+            let mut content = match (&place, &view) {
+                (Some(place), None) if screen.compact => {
+                    let mut places = places.clone();
+                    let mut search = search.clone();
+                    vec![place_header(&place.title, move || {
+                        search.reset(String::new());
+                        places.clear();
+                    })]
+                }
+                _ => vec![input.into_element()],
+            };
             if !drawer_open && input_focus().is_focused() {
                 // Typing narrows them down to the matching names.
                 let query = search.query.read().trim().to_lowercase();
@@ -473,7 +485,14 @@ impl Component for SearchPanel {
                 content.push(transit_view(view, transit.clone(), sheet_scroll));
             } else if let Some(place) = place {
                 content.push(
-                    place_details(place, transit.clone(), favorites, sheet_scroll).into_element(),
+                    place_details(
+                        place,
+                        transit.clone(),
+                        favorites,
+                        sheet_scroll,
+                        screen.compact,
+                    )
+                    .into_element(),
                 );
             }
             content
@@ -568,7 +587,12 @@ impl Component for SearchPanel {
         };
 
         panel
-            .background(Color::from_argb(250, 255, 255, 255))
+            // Opaque as a bottom sheet: the map controls under it otherwise show through.
+            .background(if sheet {
+                Color::WHITE
+            } else {
+                Color::from_argb(250, 255, 255, 255)
+            })
             .maybe(!sheet, |r| {
                 r.corner_radius(match (drawer_open, rounded) {
                     (true, _) => 0.0f32,
@@ -1232,6 +1256,7 @@ fn place_details(
     transit: TransitController,
     mut favorites: Favorites,
     scroll: SheetScroll,
+    compact: bool,
 ) -> impl IntoElement {
     let favorite = Favorite::from_place(&place);
     let saved = favorite
@@ -1271,7 +1296,25 @@ fn place_details(
         "SIRET" | "Source" | "Source date" | "Last checked" | "Last edited" => 4,
         _ => 2,
     });
+    // "Pharmacy" under the title already says `amenity=pharmacy`.
+    details.retain(|(key, value)| {
+        !(matches!(
+            key.as_str(),
+            "Amenity" | "Shop" | "Office" | "Craft" | "Tourism" | "Leisure"
+        ) && value.eq_ignore_ascii_case(&subtitle))
+    });
     let is_empty = details.is_empty() && links.is_empty() && wikipedia.is_none();
+    // On a phone, the rows about the data rather than the place wait in a folded section, so
+    // address, hours and phone fill the half-height sheet.
+    let about: Vec<(String, String)> = if compact {
+        let split = details
+            .iter()
+            .position(|(key, _)| is_about_row(key))
+            .unwrap_or(details.len());
+        details.split_off(split)
+    } else {
+        Vec::new()
+    };
 
     let mut body: Vec<Element> = Vec::new();
     if let Some(image) = image {
@@ -1308,7 +1351,90 @@ fn place_details(
                 .into_element(),
         );
     }
-    if let Some((lat, lon)) = coords {
+    let mut links = links;
+    if compact && let Some((lat, lon)) = coords {
+        let phone = details
+            .iter()
+            .find(|(key, _)| key == "Phone")
+            .and_then(|(_, value)| value.split(';').next())
+            .map(|number| {
+                number
+                    .chars()
+                    .filter(|c| c.is_ascii_digit() || *c == '+')
+                    .collect::<String>()
+            });
+        // Website and sharing move into the action row; the other links stay as chips.
+        let take = |links: &mut Vec<(String, String, String)>, name: &str| {
+            links
+                .iter()
+                .position(|(label, _, _)| label == name)
+                .map(|index| links.remove(index).2)
+        };
+        let website = take(&mut links, "Website");
+        let osm_link = take(&mut links, "OpenStreetMap");
+        let mut actions = Vec::new();
+        {
+            let mut transit = transit.clone();
+            let name = title.clone();
+            actions.push(action_button(
+                lucide::route(),
+                "Directions",
+                true,
+                move || {
+                    transit.open_planner(Some(Endpoint {
+                        name: name.clone(),
+                        lat,
+                        lon,
+                    }))
+                },
+            ));
+        }
+        if let Some(phone) = phone {
+            actions.push(action_button(lucide::phone(), "Call", false, move || {
+                crate::mobile::open_url(format!("tel:{phone}"))
+            }));
+        }
+        if let Some(url) = website {
+            actions.push(action_button(
+                lucide::globe(),
+                "Website",
+                false,
+                move || crate::mobile::open_url(url.clone()),
+            ));
+        }
+        if let Some(favorite) = favorite.clone() {
+            actions.push(action_button(
+                if saved {
+                    lucide::star_off()
+                } else {
+                    lucide::star()
+                },
+                if saved { "Saved" } else { "Save" },
+                false,
+                move || favorites.toggle(favorite.clone()),
+            ));
+        }
+        if let Some(url) = osm_link {
+            let name = title.clone();
+            actions.push(action_button(
+                lucide::share_2(),
+                "Share",
+                false,
+                move || {
+                    share(&name, &url);
+                },
+            ));
+        }
+        body.push(
+            rect()
+                .horizontal()
+                .content(Content::flex())
+                .width(Size::fill())
+                .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32))
+                .children(actions)
+                .into_element(),
+        );
+    } else if let Some((lat, lon)) = coords {
         let mut transit = transit.clone();
         let name = title.clone();
         let directions = Button::new()
@@ -1394,7 +1520,10 @@ fn place_details(
                             .cloned()
                             .map(|(label, url)| link_chip(label, url, &title).into_element()),
                     )
-                    .maybe(pair.len() == 1, |r| r.child(rect().width(Size::flex(1.0))))
+                    // A lone chip on a phone takes the whole row rather than truncating.
+                    .maybe(pair.len() == 1 && !compact, |r| {
+                        r.child(rect().width(Size::flex(1.0)))
+                    })
                     .into_element(),
             );
         }
@@ -1468,6 +1597,15 @@ fn place_details(
     if let Some(intro) = wikipedia {
         body.push(wikipedia_block(intro).into_element());
     }
+    if !about.is_empty() {
+        body.push(
+            AboutRows {
+                place_id: id,
+                rows: about,
+            }
+            .into_element(),
+        );
+    }
     if let Some((lat, lon)) = coords {
         body.push(
             StreetPhotos {
@@ -1496,6 +1634,86 @@ fn place_details(
         .margin((16.0f32, 0.0f32, 0.0f32, 0.0f32))
         .child(scroll.marker())
         .children(body)
+}
+
+/// Rows about where the data comes from rather than the place itself — folded away on a phone
+/// (see [`AboutRows`]).
+fn is_about_row(key: &str) -> bool {
+    matches!(
+        key,
+        "Coordinates" | "SIRET" | "Source" | "Source date" | "Last checked" | "Last edited"
+    )
+}
+
+/// The bottom sheet's head for a place: its name in full (up to three lines) and a ✕.
+fn place_header(title: &str, mut on_close: impl FnMut() + 'static) -> Element {
+    rect()
+        .horizontal()
+        .content(Content::flex())
+        .width(Size::fill())
+        .cross_align(Alignment::Center)
+        .spacing(8.0)
+        .padding((4.0f32, 4.0f32, 8.0f32, 4.0f32))
+        .child(
+            label()
+                .text(title.to_string())
+                .width(Size::flex(1.0))
+                .font_size(text_size(20.0))
+                .font_weight(FontWeight::BOLD)
+                .color(TEXT)
+                .max_lines(3)
+                .text_overflow(TextOverflow::Ellipsis),
+        )
+        .child(
+            rect()
+                .padding(tap_padding(8.0))
+                .corner_radius(20.0f32)
+                .background(SURFACE_ALT)
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |_: Event<PressEventData>| {
+                    haptic(Haptic::Press);
+                    on_close();
+                })
+                .child(icon(lucide::x(), TEXT_MUTED)),
+        )
+        .into_element()
+}
+
+/// One of the sheet's round action buttons, its name under it; `primary` filled in the accent
+/// colour.
+fn action_button(
+    svg: Bytes,
+    name: &'static str,
+    primary: bool,
+    mut on_press: impl FnMut() + 'static,
+) -> Element {
+    rect()
+        .vertical()
+        .width(Size::flex(1.0))
+        .cross_align(Alignment::Center)
+        .spacing(4.0)
+        .padding((4.0f32, 0.0f32))
+        .cursor(CursorIcon::Pointer)
+        .on_press(move |_: Event<PressEventData>| {
+            haptic(Haptic::Press);
+            on_press();
+        })
+        .child(
+            rect()
+                .width(Size::px(44.0))
+                .height(Size::px(44.0))
+                .corner_radius(22.0f32)
+                .center()
+                .background(if primary { ACCENT } else { SURFACE_ALT })
+                .child(icon(svg, if primary { Color::WHITE } else { ACCENT })),
+        )
+        .child(
+            label()
+                .text(name)
+                .font_size(text_size(12.0))
+                .color(if primary { ACCENT } else { TEXT }),
+        )
+        .into_element()
 }
 
 /// Icon for a detail/link row label, when there's a fitting one.
@@ -1914,6 +2132,62 @@ fn link_chip(link_label: String, url: String, title: &str) -> impl IntoElement {
                         .text_overflow(TextOverflow::Ellipsis),
                 ),
         )
+}
+
+/// "About this data": coordinates, register numbers, sources and edits, folded on a phone (see
+/// [`is_about_row`]). Starts folded for each new selection.
+#[derive(PartialEq)]
+struct AboutRows {
+    place_id: u64,
+    rows: Vec<(String, String)>,
+}
+
+impl Component for AboutRows {
+    fn render(&self) -> impl IntoElement {
+        let mut open = use_state(|| false);
+        let is_open = *open.read();
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
+            .child(divider())
+            .child(
+                rect()
+                    .horizontal()
+                    .content(Content::flex())
+                    .width(Size::fill())
+                    .cross_align(Alignment::Center)
+                    .spacing(8.0)
+                    .padding((tap_padding(8.0), 0.0))
+                    .cursor(CursorIcon::Pointer)
+                    .on_press(move |_: Event<PressEventData>| open.toggle())
+                    .child(icon(lucide::info(), TEXT_FAINT))
+                    .child(
+                        label()
+                            .text("About this data")
+                            .width(Size::flex(1.0))
+                            .font_size(text_size(12.0))
+                            .color(TEXT_MUTED),
+                    )
+                    .child(
+                        rect()
+                            .rotate(if is_open { 180.0 } else { 0.0 })
+                            .child(icon(lucide::chevron_down(), TEXT_FAINT)),
+                    ),
+            )
+            .maybe(is_open, |r| {
+                r.children(
+                    self.rows
+                        .iter()
+                        .cloned()
+                        .map(|(key, value)| detail_row(key, value)),
+                )
+            })
+    }
+
+    fn render_key(&self) -> DiffKey {
+        crate::components::place::section_key("about", self.place_id)
+    }
 }
 
 /// The "More tags" section: every OSM/MVT tag not mapped to a curated row, collapsed by default

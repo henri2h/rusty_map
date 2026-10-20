@@ -6,7 +6,6 @@
 use bytes::Bytes;
 use freya::prelude::*;
 use serde::Deserialize;
-use torin::prelude::Direction;
 
 use map_component::util::tiles::{FetchError, background_runtime, client};
 
@@ -262,21 +261,28 @@ impl Component for StreetPhotos {
                     .font_size(text_size(12.0))
                     .color(TEXT_MUTED),
             )
-            .child(
-                ScrollView::new()
-                    .direction(Direction::horizontal())
-                    .width(Size::fill())
-                    // A photo plus its date line: `auto` leaves a gap under a horizontal strip.
-                    .height(Size::px(120.0))
-                    .show_scrollbar(false)
-                    .child(
-                        rect().horizontal().spacing(8.0).children(
-                            photos
-                                .iter()
-                                .enumerate()
-                                .map(|(index, photo)| photo_card(photo, index, viewing)),
-                        ),
-                    ),
+            // Two per row, not a sideways-scrolling strip: nested in the bottom sheet's own
+            // scroll, a horizontal `ScrollView` drew its photos off-place (blank on a phone).
+            .children(
+                photos
+                    .iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+                    .chunks(2)
+                    .map(|pair| {
+                        rect()
+                            .horizontal()
+                            .content(Content::flex())
+                            .width(Size::fill())
+                            .spacing(8.0)
+                            .children(
+                                pair.iter()
+                                    .map(|(index, photo)| photo_card(photo, *index, viewing)),
+                            )
+                            .maybe(pair.len() == 1, |r| r.child(rect().width(Size::flex(1.0))))
+                            .into_element()
+                    })
+                    .collect::<Vec<_>>(),
             )
             .maybe_child((*viewing.read()).map(|index| {
                 PhotoViewer {
@@ -327,6 +333,7 @@ fn set_viewer_open(open: bool) {
 fn photo_card(photo: &Photo, index: usize, mut viewing: State<Option<usize>>) -> Element {
     rect()
         .vertical()
+        .width(Size::flex(1.0))
         .spacing(2.0)
         .cursor(CursorIcon::Pointer)
         .on_press(move |_: Event<PressEventData>| {
@@ -336,8 +343,8 @@ fn photo_card(photo: &Photo, index: usize, mut viewing: State<Option<usize>>) ->
         })
         .child(
             rect()
-                .width(Size::px(160.0))
-                .height(Size::px(100.0))
+                .width(Size::fill())
+                .height(Size::px(110.0))
                 .corner_radius(8.0f32)
                 .overflow(Overflow::Clip)
                 .background(SURFACE_ALT)
