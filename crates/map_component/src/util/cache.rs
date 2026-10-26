@@ -22,7 +22,8 @@ use crate::style::StyleSpec;
 use super::{
     renderer::{self, CompiledTile, ZoomDependentEntry},
     tiles::{
-        TileKey, fetch_tile, rasterize_cell_in_background, rasterize_zoom_dependent_in_background,
+        FetchError, TileKey, fetch_tile, rasterize_cell_in_background,
+        rasterize_zoom_dependent_in_background,
     },
     viewport::{MAX_FALLBACK_LEVELS, Viewport},
 };
@@ -34,6 +35,14 @@ use super::{
 /// a large screen (tiles are 362-724px), plus some pan buffer. (Heavy over-zoom doesn't need a bigger bitmap
 /// here — it's drawn from separately baked cells, see `cell_level`.)
 const TILE_CACHE_CAPACITY: usize = 64;
+
+/// Screens' worth of tiles kept, see [`fit_caches_to_screen`]: a zoom gesture back and forth
+/// across a few levels revisits about that many, and re-fetching evicted ones was what blinked.
+const SCREENS_KEPT: usize = 5;
+/// Upper bounds for [`fit_caches_to_screen`] (tiles: ~630MiB of bitmaps at most, base plus
+/// `CompiledTile::lines`).
+const TILE_CACHE_MAX: usize = 192;
+const ZOOM_DEP_CACHE_MAX: usize = 320;
 
 /// How long a failed tile (network error, timeout, HTTP error) stays failed before the next view
 /// change that needs it fetches it again — without this, one failure blanked a tile for the
@@ -49,13 +58,25 @@ pub enum TileState {
 }
 
 pub struct TileCacheData {
+    /// Loaded tiles only.
     entries: RefCell<LruCache<TileKey, TileState>>,
+    /// Tiles still downloading or recently failed — kept apart so a zoom gesture's burst of new
+    /// requests can't evict the loaded tiles standing in for them meanwhile (blank squares).
+    waiting: RefCell<rustc_hash::FxHashMap<TileKey, TileState>>,
+    /// Tiles the latest view needs (on screen plus prefetched stand-ins), replaced by every
+    /// `ensure_tiles_fetched`: a queued fetch for anything else is dropped (see `fetch_tile`).
+    wanted: Arc<std::sync::Mutex<rustc_hash::FxHashSet<TileKey>>>,
     /// Bumped by [`Self::reset`]; a fetch started before a reset drops its result instead of
     /// storing a tile compiled against the previous style.
     generation: Cell<u64>,
 }
 
 impl TileCacheData {
+    /// `true` while `key` is downloading or recently failed (so `ensure_view` won't start it).
+    pub fn is_waiting(&self, key: &TileKey) -> bool {
+        self.waiting.borrow().contains_key(key)
+    }
+
     pub fn borrow(&self) -> Ref<'_, LruCache<TileKey, TileState>> {
         self.entries.borrow()
     }
@@ -68,6 +89,7 @@ impl TileCacheData {
     /// change, which invalidates every compiled tile.
     pub fn reset(&self) {
         self.entries.borrow_mut().clear();
+        self.waiting.borrow_mut().clear();
         self.generation.set(self.generation.get() + 1);
     }
 }
@@ -79,6 +101,8 @@ pub fn new_tile_cache() -> TileCache {
         entries: RefCell::new(LruCache::new(
             NonZeroUsize::new(TILE_CACHE_CAPACITY).unwrap(),
         )),
+        waiting: RefCell::default(),
+        wanted: Arc::default(),
         generation: Cell::new(0),
     })
 }
@@ -135,9 +159,29 @@ pub struct ZoomDepCacheData {
     wanted_bucket: Arc<AtomicI32>,
     /// Bumped by [`Self::clear`]; a bake started before then is dropped when it finishes.
     generation: Cell<u64>,
+    /// The view `ensure_tile_bakes` last saw: a tile that finishes loading is baked for it, not
+    /// for the view it was requested at — mid-zoom that one is a few buckets off already, and
+    /// nothing would bake the tile for where the zoom ended until the next input event.
+    latest_view: Cell<Option<(CursorPoint, f32, Size2D)>>,
+    /// Poked by the paint loop when a visible tile or bake is missing or stale for the current
+    /// view (evicted from its LRU, or a fetch/bake that never started) — it can't `spawn` one
+    /// itself. `MapComponent` waits on it and calls `ensure_view` again.
+    rebake: Rc<tokio::sync::Notify>,
 }
 
 impl ZoomDepCacheData {
+    /// Asks for `ensure_view` to run again (see `rebake`): cheap, and repeated calls before it
+    /// runs coalesce into one.
+    pub fn request_view_refresh(&self) {
+        self.rebake.notify_one();
+    }
+
+    /// Resolves once [`Self::request_view_refresh`] has been called.
+    pub fn view_refresh_requested(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let rebake = self.rebake.clone();
+        async move { rebake.notified().await }
+    }
+
     /// Drops every bake — for a style change, after which they show the old style.
     pub fn clear(&self) {
         self.entries.borrow_mut().clear();
@@ -158,6 +202,8 @@ pub fn new_zoom_dep_cache() -> ZoomDepCache {
         )),
         wanted_bucket: Arc::new(AtomicI32::new(i32::MIN)),
         generation: Cell::new(0),
+        latest_view: Cell::new(None),
+        rebake: Rc::new(tokio::sync::Notify::new()),
     })
 }
 
@@ -248,6 +294,9 @@ fn ensure_tile_bakes(
     zoom_dep_cache
         .wanted_bucket
         .store(zoom_dep_bucket(zoom), Ordering::Relaxed);
+    zoom_dep_cache
+        .latest_view
+        .set(Some((center, zoom, viewport_size)));
 
     let cache = tile_cache.borrow();
     for tile_y in tile_y_min..tile_y_max {
@@ -286,7 +335,9 @@ fn bake_tile(
     platform: &PlatformWindow,
 ) {
     let bucket = zoom_dep_bucket(zoom);
-    let Some(level) = cell_level(viewport.tile_px) else {
+    // This tile's own on-screen size: smaller than the view's for a coarser prefetched one.
+    let tile_px = viewport.tile_px / (1u32 << viewport.zoom_z.saturating_sub(key.0)) as f32;
+    let Some(level) = cell_level(tile_px) else {
         if tile.zoom_dependent.is_empty() {
             return;
         }
@@ -297,13 +348,17 @@ fn bake_tile(
                 &tile.zoom_dependent,
                 style,
                 (bucket as f32 * ZOOM_DEP_BUCKET_STEP) as f64,
-                viewport.tile_px.round().max(1.0) as i32,
+                tile_px.round().max(1.0) as i32,
                 zoom_dep_cache,
                 platform,
             );
         }
         return;
     };
+    // Cells are only baked for the view's own level (prefetched coarser tiles stay whole).
+    if key.0 != viewport.zoom_z {
+        return;
+    }
 
     // Sized for the bucket's own zoom, not the exact current one, so the bitmap for a given key
     // is always the same size no matter which zoom inside the bucket requested it.
@@ -569,24 +624,85 @@ fn ensure_tiles_fetched(
 ) {
     let viewport = Viewport::new(center, zoom, style.max_real_zoom);
     let (tile_x_min, tile_x_max, tile_y_min, tile_y_max) = viewport.tile_range(viewport_size);
+    fit_caches_to_screen(
+        tile_cache,
+        zoom_dep_cache,
+        ((tile_x_max - tile_x_min) * (tile_y_max - tile_y_min)).max(0) as usize,
+    );
 
-    for tile_y in tile_y_min..tile_y_max {
-        for tile_x in tile_x_min..tile_x_max {
-            if let Some(key) = viewport.tile_key(tile_x, tile_y) {
-                fetch_tile_if_new(
-                    key,
-                    center,
-                    zoom,
-                    viewport_size,
-                    tile_cache,
-                    zoom_dep_cache,
-                    style,
-                    platform,
-                );
+    // On screen first, then the coarser stand-ins.
+    let mut keys: Vec<TileKey> = (tile_y_min..tile_y_max)
+        .flat_map(|y| (tile_x_min..tile_x_max).map(move |x| (x, y)))
+        .filter_map(|(x, y)| viewport.tile_key(x, y))
+        .collect();
+    keys.extend(ancestor_keys(
+        &viewport,
+        (tile_x_min, tile_x_max, tile_y_min, tile_y_max),
+    ));
+    // Recorded before fetching: what's already queued for an old view gets dropped meanwhile.
+    *tile_cache.wanted.lock().unwrap() = keys.iter().copied().collect();
+
+    for key in keys {
+        fetch_tile_if_new(
+            key,
+            center,
+            zoom,
+            viewport_size,
+            tile_cache,
+            zoom_dep_cache,
+            style,
+            platform,
+        );
+    }
+}
+
+/// One and two levels coarser than the view, over the area a zoom-out reveals (twice the view
+/// each way): the new tiles coming in at the screen edges then have a blurry stand-in instead of
+/// blinking blank until their level loads. Nearest level first.
+fn ancestor_keys(
+    viewport: &Viewport,
+    (tile_x_min, tile_x_max, tile_y_min, tile_y_max): (i64, i64, i64, i64),
+) -> Vec<TileKey> {
+    let z = viewport.zoom_z;
+    let (margin_x, margin_y) = (
+        (tile_x_max - tile_x_min + 1) / 2,
+        (tile_y_max - tile_y_min + 1) / 2,
+    );
+    let mut ancestors: Vec<TileKey> = Vec::new();
+    for up in 1..=ANCESTOR_PREFETCH_LEVELS.min(z) {
+        for tile_y in tile_y_min - margin_y..tile_y_max + margin_y {
+            for tile_x in tile_x_min - margin_x..tile_x_max + margin_x {
+                if let Some((_, x, y)) = viewport.tile_key(tile_x, tile_y) {
+                    let key = (z - up, x >> up, y >> up);
+                    if !ancestors.contains(&key) {
+                        ancestors.push(key);
+                    }
+                }
             }
         }
     }
+    ancestors
 }
+
+/// Grows the tile and line-bake caches to hold [`SCREENS_KEPT`] screens of `visible` tiles: the
+/// fixed sizes fit a phone, but a large window shows 30+ tiles, so zooming in and out evicted
+/// (and re-fetched, blank meanwhile) the very tiles just shown. Never shrinks.
+fn fit_caches_to_screen(tile_cache: &TileCache, zoom_dep_cache: &ZoomDepCache, visible: usize) {
+    let tiles = (visible * SCREENS_KEPT).clamp(TILE_CACHE_CAPACITY, TILE_CACHE_MAX);
+    grow(&mut tile_cache.entries.borrow_mut(), tiles);
+    // A bake per tile for each of the few zoom buckets a level spans.
+    let bakes = (visible * SCREENS_KEPT * 2).clamp(ZOOM_DEP_CACHE_CAPACITY, ZOOM_DEP_CACHE_MAX);
+    grow(&mut zoom_dep_cache.entries.borrow_mut(), bakes);
+}
+
+fn grow<K: std::hash::Hash + Eq, V>(cache: &mut LruCache<K, V>, wanted: usize) {
+    if wanted > cache.cap().get() {
+        cache.resize(NonZeroUsize::new(wanted).unwrap());
+    }
+}
+
+/// How many levels above the view `ensure_tiles_fetched` also loads, as zoom-out stand-ins.
+const ANCESTOR_PREFETCH_LEVELS: u32 = 2;
 
 /// Marks `key` as pending and spawns its fetch, unless it's already loading/settled.
 /// `center`/`zoom`/`viewport_size` = the view at request time: once the tile loads, it's baked
@@ -603,13 +719,17 @@ fn fetch_tile_if_new(
     style: &Arc<StyleSpec>,
     platform: &PlatformWindow,
 ) {
-    match tile_cache.borrow_mut().peek(&key) {
+    if tile_cache.borrow().contains(&key) {
+        return;
+    }
+    match tile_cache.waiting.borrow().get(&key) {
         Some(TileState::Failed(at)) if at.elapsed() >= FAILED_RETRY_AFTER => {}
         Some(_) => return,
         None => {}
     }
     store_tile(tile_cache, key, TileState::Pending);
     let generation = tile_cache.generation.get();
+    let wanted = tile_cache.wanted.clone();
 
     let tile_cache = tile_cache.clone();
     let zoom_dep_cache = zoom_dep_cache.clone();
@@ -617,23 +737,48 @@ fn fetch_tile_if_new(
     let platform = platform.clone();
 
     spawn(async move {
-        let fetched = fetch_tile(key, style.clone()).await;
+        let fetched = fetch_tile(key, style.clone(), move || {
+            wanted.lock().is_ok_and(|wanted| wanted.contains(&key))
+        })
+        .await;
         if tile_cache.generation.get() != generation {
             // Compiled against a style that has since been replaced.
             return;
         }
+        if matches!(fetched, Err(FetchError::Obsolete)) {
+            // Not failed, just not needed now: a later view asking for it fetches it afresh.
+            tile_cache.waiting.borrow_mut().remove(&key);
+            return;
+        }
+        // Worth retrying unprompted: the network or server hiccuped. An empty or missing tile
+        // (open sea) would come back the same.
+        let transient = match &fetched {
+            Err(FetchError::Network(_) | FetchError::TaskFailed) => true,
+            Err(FetchError::Http(status)) => *status >= 500 || *status == 429,
+            _ => false,
+        };
         let state = match fetched {
             Ok(compiled) => {
-                bake_tile(
-                    key,
-                    &compiled,
-                    &Viewport::new(center, zoom, style.max_real_zoom),
-                    zoom,
-                    viewport_size,
-                    &style,
-                    &zoom_dep_cache,
-                    &platform,
-                );
+                let (center, zoom, viewport_size) =
+                    zoom_dep_cache
+                        .latest_view
+                        .get()
+                        .unwrap_or((center, zoom, viewport_size));
+                let viewport = Viewport::new(center, zoom, style.max_real_zoom);
+                // The view's level, and the one coarser a zoom-out lands on (deeper stand-ins
+                // and finer leftovers make do with `CompiledTile::lines`).
+                if matches!(viewport.zoom_z.checked_sub(key.0), Some(0 | 1)) {
+                    bake_tile(
+                        key,
+                        &compiled,
+                        &viewport,
+                        zoom,
+                        viewport_size,
+                        &style,
+                        &zoom_dep_cache,
+                        &platform,
+                    );
+                }
                 TileState::Loaded(Rc::new(compiled))
             }
             Err(_) => TileState::Failed(std::time::Instant::now()),
@@ -641,6 +786,31 @@ fn fetch_tile_if_new(
 
         store_tile(&tile_cache, key, state);
         platform.send(UserEvent::RequestRedraw);
+
+        // Retry by itself while the view still wants it: otherwise it stayed blank until the
+        // view moved again.
+        if transient {
+            super::tiles::background_delay(FAILED_RETRY_AFTER).await;
+            if tile_cache.generation.get() != generation {
+                return;
+            }
+            let Some((center, zoom, viewport_size)) = zoom_dep_cache.latest_view.get() else {
+                return;
+            };
+            let still_wanted = tile_cache.wanted.lock().is_ok_and(|w| w.contains(&key));
+            if still_wanted {
+                fetch_tile_if_new(
+                    key,
+                    center,
+                    zoom,
+                    viewport_size,
+                    &tile_cache,
+                    &zoom_dep_cache,
+                    &style,
+                    &platform,
+                );
+            }
+        }
     });
 }
 
@@ -648,6 +818,18 @@ fn fetch_tile_if_new(
 /// thread when nothing else still holds it: dropping one frees thousands of small allocations
 /// (per-feature paths, labels), measured ~15% of main-thread time while zooming churns the cache.
 fn store_tile(tile_cache: &TileCache, key: TileKey, state: TileState) {
+    if !matches!(state, TileState::Loaded(_)) {
+        let mut waiting = tile_cache.waiting.borrow_mut();
+        // Old failures of tiles long off screen.
+        if waiting.len() > 256 {
+            waiting.retain(|_, state| {
+                !matches!(state, TileState::Failed(at) if at.elapsed() > FAILED_RETRY_AFTER * 6)
+            });
+        }
+        waiting.insert(key, state);
+        return;
+    }
+    tile_cache.waiting.borrow_mut().remove(&key);
     let evicted = tile_cache.borrow_mut().push(key, state);
     if let Some((_, TileState::Loaded(tile))) = evicted
         && let Ok(tile) = Rc::try_unwrap(tile)

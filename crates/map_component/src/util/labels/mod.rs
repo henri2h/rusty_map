@@ -119,6 +119,11 @@ pub struct IconCandidate<'a> {
 /// search filter sets this and requests a redraw.
 pub type SymbolFilter = dyn Fn(&SymbolLayer, &Properties) -> bool;
 
+/// A normalized tile-local position inside the tile proper, not its buffer.
+pub fn in_tile(x: f32, y: f32) -> bool {
+    (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)
+}
+
 /// Collects candidates for one visible tile's labels. Called from the paint loop's tile loop
 /// (`Loaded` arm) so no second cache walk/borrow is needed. `zoom` is the continuous zoom —
 /// the exact style gate runs here, per-frame.
@@ -150,6 +155,12 @@ pub fn collect_candidates<'a>(
         }
 
         let mut push = |x: f32, y: f32, angle: f32, avail_px: f32| {
+            // Only anchors inside the tile itself: its buffer repeats what lies just past its
+            // edge — the neighbour tile's own labels, or at z0 the world wrapped around, whose
+            // labels then showed beside the single world tile with no map under them.
+            if !in_tile(x, y) {
+                return;
+            }
             let screen_x = tile_screen_x + x * tile_px;
             let screen_y = tile_screen_y + y * tile_px;
             if screen_x < -CULL_PAD

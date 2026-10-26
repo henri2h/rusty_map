@@ -42,9 +42,8 @@ use crate::{
         },
     },
     mobile::{
-        Haptic, Pull, SHEET_PERCENT, Screen, SheetScroll, TOUCH, haptic, is_compact, on_pull_end,
-        on_pull_move, on_pull_start, on_sheet_pull_start, share, tap_padding, text_size,
-        use_screen, use_sheet_scroll,
+        Haptic, SHEET_PERCENT, Screen, TOUCH, haptic, is_compact, share, tap_padding, text_size,
+        use_screen,
     },
 };
 
@@ -272,7 +271,7 @@ impl Component for SearchPanel {
         let input_focus = use_focus(input_id);
         let screen = use_screen();
         let mut sheet_expanded = use_state(|| false);
-        let pull = use_state(Pull::default);
+        let pull = use_sheet_pull();
         // The sheet's scrolled content, so a pull anywhere on it doesn't fight its scrolling.
         let sheet_scroll = use_sheet_scroll();
         use_provide_context(move || sheet_scroll);
@@ -527,7 +526,7 @@ impl Component for SearchPanel {
         };
 
         let panel = if sheet {
-            bottom_sheet(screen, *sheet_expanded.read(), pull.read().offset)
+            bottom_sheet(screen, *sheet_expanded.read(), pull.offset())
         } else if screen.compact {
             rect()
                 .position(Position::new_absolute().top(0.0f32).left(0.0f32))
@@ -612,17 +611,23 @@ impl Component for SearchPanel {
             .on_global_key_down(on_back)
             // The whole sheet pulls down, not only its grab bar (see `on_sheet_pull_start`).
             .maybe(sheet, |r| {
-                r.on_pointer_down(on_sheet_pull_start(pull, sheet_scroll))
+                r.on_pointer_down(pull.on_sheet_grab(sheet_scroll))
             })
-            .on_global_pointer_move(on_pull_move(pull))
-            .on_global_pointer_up(on_pull_end(pull, close_sheet))
+            .on_global_pointer_move(pull.on_move())
+            .on_global_pointer_up(pull.on_release({
+                let mut close_sheet = close_sheet;
+                move || {
+                    haptic(Haptic::Press);
+                    close_sheet();
+                }
+            }))
             .child(handle)
             .children(content)
     }
 }
 
 /// Compact layout's drawer and search: a sheet along the bottom edge, leaving the top of the map
-/// visible, or `full` height; `pulled` down by that much (see [`Pull`]).
+/// visible, or `full` height; `pulled` down by that much (see [`SheetPull`]).
 fn bottom_sheet(screen: Screen, full: bool, pulled: f32) -> Rect {
     let top = screen.insets.top;
     rect()
@@ -647,27 +652,13 @@ fn bottom_sheet(screen: Screen, full: bool, pulled: f32) -> Rect {
 /// The grab bar atop the bottom sheet: pulling it down closes the sheet (see `close_sheet`); a
 /// tap toggles a place's sheet between half and full height, or closes the search. Pulls start
 /// here only, so scrolling the sheet's content never drags it.
-fn sheet_handle(pull: State<Pull>, mut on_press: impl FnMut() + 'static) -> Element {
-    rect()
-        .width(Size::fill())
-        .padding((tap_padding(10.0), 0.0))
-        .center()
-        .on_pointer_down(on_pull_start(pull))
-        .on_press(move |_: Event<PressEventData>| {
-            // The release of a pull, not a tap.
-            if pull.peek().moved {
-                return;
-            }
+fn sheet_handle(pull: SheetPull, mut on_press: impl FnMut() + 'static) -> Element {
+    SheetHandle::new(pull)
+        .handle_color(DIVIDER)
+        .on_press(move |_| {
             haptic(Haptic::Press);
             on_press();
         })
-        .child(
-            rect()
-                .width(Size::px(36.0))
-                .height(Size::px(4.0))
-                .corner_radius(2.0f32)
-                .background(DIVIDER),
-        )
         .into_element()
 }
 

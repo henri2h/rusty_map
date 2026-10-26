@@ -43,7 +43,7 @@ async fn main() {
         pick_transit_lines: false,
     });
 
-    let tile = fetch_tile((14, x, y), style.clone())
+    let tile = fetch_tile((14, x, y), style.clone(), || true)
         .await
         .expect("tile in disk cache");
     let line_labels = tile

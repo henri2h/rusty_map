@@ -71,12 +71,15 @@ pub fn paint_map(
 
     let mut tiles_time = time::Duration::ZERO;
     let mut tiles_drawn = 0usize;
+    // Gaps this frame, for the `[holes]` log: tiles with nothing to draw, tiles drawn without
+    // their lines, over-zoom cells drawn without theirs.
+    let (mut blank_tiles, mut bare_tiles, mut bare_cells) = (0usize, 0usize, 0usize);
 
     // Loaded tiles kept alive past the tile loop so their labels can feed the label pass (the
     // `Rc` clone is cheap; the borrow of `cache` ends with the loop). Tuple: (tile, screen_x,
     // screen_y, on-screen tile size) — the size is per-entry because ancestor tiles standing in
     // for still-loading ones are drawn `2^levels` larger than the current zoom's tiles.
-    let mut label_tiles: Vec<(Rc<CompiledTile>, f32, f32, f32)> = Vec::new();
+    let mut label_tiles: Vec<LabelTile> = Vec::new();
 
     // Ancestors contributing labels this frame — several pending tiles share one ancestor, and
     // its labels must be pushed only once.
@@ -151,28 +154,39 @@ pub fn paint_map(
                             viewport.tile_px,
                         );
                         zoom_dep_time = zoom_dep_start.elapsed();
+                        bare_tiles += usize::from(zoom_dep_tag == "missing");
+                        // (`"fallback"` = the tile's own rough lines, see `CompiledTile::lines`.)
                     }
                 }
                 // Not loaded yet (or failed) — fall back to the nearest already-loaded ancestor
-                // tile, cropped to this tile's quadrant and stretched to fill, so zooming in shows
-                // a blurry-but-correct preview instead of a blank flash while the real tile
-                // fetches. No `zoom_dependent` overlay here: the ancestor's per-feature paths
-                // don't correspond to this tile's exact geometry, so it's skipped until the real
-                // tile replaces this stand-in.
+                // tile (and its fallback lines), cropped to this tile's quadrant and stretched to
+                // fill, so zooming in shows a blurry-but-correct preview instead of a blank flash
+                // while the real tile fetches.
                 _ => {
-                    if let Some((ancestor, levels)) =
-                        find_loaded_ancestor(&mut cache, viewport.zoom_z, key.1, key.2)
-                    {
+                    // Evicted while on screen (or never asked for): only `ensure_view` fetches.
+                    if !tile_cache.is_waiting(&key) {
+                        zoom_dep_cache.request_view_refresh();
+                    }
+                    // Zooming out, the coarser tiles are rarely cached but the finer ones just
+                    // looked at are: draw those over the (blurry or absent) ancestor, so the map
+                    // doesn't flash empty until the new level loads.
+                    let ancestor = find_loaded_ancestor(&mut cache, viewport.zoom_z, key.1, key.2);
+                    let had_ancestor = ancestor.is_some();
+                    if let Some((ancestor, levels)) = ancestor {
                         path_tag = "unloaded-ancestor";
-                        draw_ancestor_fallback(
-                            context,
-                            &ancestor.image,
-                            key.1,
-                            key.2,
-                            levels,
-                            viewport.tile_px,
-                            &image_paint,
-                        );
+                        // Its lines only from close by: stretched further, they turn into blobs.
+                        let lines = ancestor.lines.as_ref().filter(|_| levels <= 2);
+                        for image in std::iter::once(&ancestor.image).chain(lines) {
+                            draw_ancestor_fallback(
+                                context,
+                                image,
+                                key.1,
+                                key.2,
+                                levels,
+                                viewport.tile_px,
+                                &image_paint,
+                            );
+                        }
 
                         // Borrow the ancestor's *labels* too: without this, crossing an integer
                         // zoom level makes every label vanish for the moment all tiles are
@@ -197,10 +211,27 @@ pub fn paint_map(
                             ));
                         }
                     }
+                    let drew_children = draw_loaded_descendants(
+                        context,
+                        &mut cache,
+                        key,
+                        style.max_real_zoom,
+                        DESCENDANT_FALLBACK_LEVELS,
+                        (screen_x, screen_y),
+                        viewport.tile_px,
+                        &image_paint,
+                        // Their labels only when there's no ancestor's to show already.
+                        (!had_ancestor).then_some(&mut label_tiles),
+                    );
+                    if drew_children && !had_ancestor {
+                        path_tag = "unloaded-children";
+                    }
+                    blank_tiles += usize::from(!drew_children && !had_ancestor);
                 }
             }
 
             context.canvas.restore();
+            bare_cells += cell_stats.map_or(0, |c| c.bare);
 
             let tile_time = time_start_tile.elapsed();
             tiles_time += tile_time;
@@ -265,6 +296,10 @@ pub fn paint_map(
     if zoom >= style.icon_min_zoom && sprite_sheet.is_some() {
         for (tile, tile_screen_x, tile_screen_y, tile_px) in &label_tiles {
             for poi in &tile.pois {
+                // The neighbour tile's (see `labels::in_tile`).
+                if !labels::in_tile(poi.x, poi.y) {
+                    continue;
+                }
                 let screen_x = tile_screen_x + poi.x * tile_px;
                 let screen_y = tile_screen_y + poi.y * tile_px;
                 if screen_x < -32.0
@@ -348,6 +383,13 @@ pub fn paint_map(
     let placed_count = placed.len();
     *placed_labels.borrow_mut() = placed;
 
+    if blank_tiles + bare_tiles + bare_cells > 0 {
+        log::debug!(
+            "[holes] z{zoom:.2}: {blank_tiles} blank tiles, {bare_tiles} tiles without lines, \
+             {bare_cells} cells without lines"
+        );
+    }
+
     let dt = time_start.elapsed().as_millis();
     if dt > 1 && log::log_enabled!(log::Level::Debug) {
         // `other` = frame time not spent inside per-tile drawing: background rect, tile-range
@@ -413,8 +455,16 @@ fn draw_zoom_dependent(
 
     let Some((image, stale)) = zoom_dep_lookup(zoom_dep_cache, key, zoom_dep_bucket(zoom as f32))
     else {
-        return "missing";
+        zoom_dep_cache.request_view_refresh();
+        let Some(lines) = &tile.lines else {
+            return "missing";
+        };
+        blit_tile_image(context, lines, tile_px, &Paint::default());
+        return "fallback";
     };
+    if stale {
+        zoom_dep_cache.request_view_refresh();
+    }
 
     blit_tile_image(context, &image, tile_px, &Paint::default());
     if stale { "stale" } else { "exact" }
@@ -427,6 +477,8 @@ struct CellStats {
     stale: usize,
     ancestor: usize,
     missing: usize,
+    /// Of `missing`, those drawn without any lines (no `CompiledTile::lines` either).
+    bare: usize,
 }
 
 /// Draws an over-zoomed tile's visible cells (canvas already translated to the tile's screen
@@ -462,6 +514,9 @@ fn draw_cells(
                 } else {
                     stats.exact += 1;
                 }
+                if hit.level < level || hit.stale {
+                    zoom_dep_cache.request_view_refresh();
+                }
                 // The found cell's own on-screen rect; for an ancestor, larger than `dest` and
                 // cropped by the clip.
                 let hit_size = cell * (1u32 << (level - hit.level)) as f32;
@@ -479,7 +534,12 @@ fn draw_cells(
             }
             None => {
                 stats.missing += 1;
+                zoom_dep_cache.request_view_refresh();
                 blit_tile_image(context, &tile.image, tile_px, paint);
+                match &tile.lines {
+                    Some(lines) => blit_tile_image(context, lines, tile_px, paint),
+                    None => stats.bare += 1,
+                }
                 let child = cell / 2.0;
                 for (image, x, y) in cell_children(zoom_dep_cache, key, bucket, level, cx, cy) {
                     draw_image_at(
@@ -505,6 +565,68 @@ fn draw_image_at(context: &mut FillRenderContext, image: &Image, dest: Rect, pai
         SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
         paint,
     );
+}
+
+/// A tile whose labels the label pass places: `(tile, screen x, screen y, on-screen size)`.
+type LabelTile = (Rc<CompiledTile>, f32, f32, f32);
+
+/// How many zoom levels finer [`draw_loaded_descendants`] looks: a quick pinch-out spans that.
+const DESCENDANT_FALLBACK_LEVELS: u32 = 3;
+
+/// Draws whichever finer tiles under `key` are loaded (down to `levels` deeper, never past
+/// `max_real_zoom`), each shrunk into its part of the `tile_px` square at the canvas origin — the
+/// zoom-out counterpart of [`draw_ancestor_fallback`]. Their labels go into `label_tiles` when
+/// given. `true` when any was drawn.
+#[allow(clippy::too_many_arguments)]
+fn draw_loaded_descendants(
+    context: &mut FillRenderContext,
+    cache: &mut lru::LruCache<TileKey, TileState>,
+    (z, x, y): TileKey,
+    max_real_zoom: u32,
+    levels: u32,
+    (screen_x, screen_y): (f32, f32),
+    tile_px: f32,
+    paint: &Paint,
+    mut label_tiles: Option<&mut Vec<LabelTile>>,
+) -> bool {
+    if levels == 0 || z >= max_real_zoom {
+        return false;
+    }
+    let half = tile_px / 2.0;
+    let mut drew = false;
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        let child = (z + 1, 2 * x + dx, 2 * y + dy);
+        let (ox, oy) = (dx as f32 * half, dy as f32 * half);
+        context.canvas.save();
+        context.canvas.translate((ox, oy));
+        // `get`, not `peek`: a stand-in on screen counts as used, so it isn't evicted first.
+        if let Some(TileState::Loaded(tile)) = cache.get(&child).cloned() {
+            blit_tile_image(context, &tile.image, half, paint);
+            if let Some(lines) = &tile.lines {
+                blit_tile_image(context, lines, half, paint);
+            }
+            if let Some(label_tiles) = label_tiles.as_deref_mut()
+                && (!tile.labels.is_empty() || !tile.pois.is_empty())
+            {
+                label_tiles.push((tile.clone(), screen_x + ox, screen_y + oy, half));
+            }
+            drew = true;
+        } else {
+            drew |= draw_loaded_descendants(
+                context,
+                cache,
+                child,
+                max_real_zoom,
+                levels - 1,
+                (screen_x + ox, screen_y + oy),
+                half,
+                paint,
+                label_tiles.as_deref_mut(),
+            );
+        }
+        context.canvas.restore();
+    }
+    drew
 }
 
 /// Blits a tile bitmap stretched to the tile's current on-screen size, with linear sampling so

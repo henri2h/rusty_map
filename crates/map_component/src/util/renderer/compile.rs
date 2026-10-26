@@ -18,6 +18,9 @@ use super::{FeatureGeometry, Properties, RenderableTile};
 /// `cache::cell_level`) — so this only has to comfortably cover the normal `tile_px` range.
 pub const TILE_RASTER_SIZE: i32 = 768;
 
+/// Side of [`CompiledTile::lines`]: about a tile's usual on-screen size (~1MiB each).
+pub const LINES_FALLBACK_SIZE: i32 = 512;
+
 // ─── Style compilation ────────────────────────────────────────────────────────
 //
 // Filtering/coloring/drawing a tile's features against a style is real work, so it's done once
@@ -50,6 +53,11 @@ pub struct CompiledTile {
     /// paths each frame so their color can track the continuous zoom value exactly. All lines
     /// land here unconditionally too, regardless of color — see `record_line_layer`'s doc comment.
     pub zoom_dependent: Vec<ZoomDependentEntry>,
+    /// `zoom_dependent` rasterized once at the tile's own zoom, at [`LINES_FALLBACK_SIZE`]: drawn
+    /// while the exact per-bucket bake isn't ready (a tile that just loaded or whose bakes were
+    /// evicted), so roads never vanish mid-zoom — only their width is off for a few frames.
+    /// `None` when there are no such layers.
+    pub lines: Option<Image>,
     /// POI icon markers extracted from the shortbread `pois` source layer (the style itself has
     /// no icon layers — icons are this app's own addition), drawn/hit-tested by the label pass.
     pub pois: Vec<CompiledPoi>,
@@ -306,10 +314,14 @@ pub fn compile_tile(tile: &RenderableTile, style: &StyleSpec, zoom_z: u32) -> Co
         log::debug!("  [compile-detail] filter+record {record_ms} ms, rasterize {raster_ms} ms");
     }
 
+    let lines = (!zoom_dependent.is_empty())
+        .then(|| rasterize_zoom_dependent(&zoom_dependent, style, zoom, LINES_FALLBACK_SIZE));
+
     CompiledTile {
         image,
         picture,
         zoom_dependent,
+        lines,
         labels,
         pois: extract_pois(tile, style.poi_filter.as_ref()),
         transit_lines: extract_transit_lines(tile),
@@ -322,6 +334,17 @@ pub fn compile_tile(tile: &RenderableTile, style: &StyleSpec, zoom_z: u32) -> Co
 /// layer schema. Different styles use different vector schemas, so both are checked.
 const POI_KIND_KEYS: &[&str] = &[
     "subclass", "class", "kind", "shop", "amenity", "tourism", "leisure", "craft",
+];
+
+/// Kinds of unnamed POI not worth an icon: a city tile has hundreds of garden pools, gates,
+/// bins and bollards.
+/// (Unnamed parking stays: people look for those.) The tile build drops them too.
+const UNNAMED_SKIPPED: &[&str] = &[
+    "swimming_pool",
+    "gate",
+    "lift_gate",
+    "waste_basket",
+    "bollard",
 ];
 
 /// Source layer names carrying POI point features, checked in order: `poi` is OpenMapTiles'
@@ -362,6 +385,9 @@ fn extract_pois(tile: &RenderableTile, filter: Option<&Filter>) -> Vec<CompiledP
                 _ => None,
             })
             .unwrap_or_default();
+        if name.is_empty() && UNNAMED_SKIPPED.contains(&kind.as_str()) {
+            continue;
+        }
 
         let class = match feature.properties.get("class") {
             Some(mvt_reader::feature::Value::String(class))

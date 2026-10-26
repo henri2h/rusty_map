@@ -68,17 +68,31 @@ async fn on_blocking_pool<T: Send + 'static>(
 }
 
 /// Fetches, decodes, and compiles a tile against `style` (disk cache, then network, then MVT
-/// decode, then style filtering/coloring), off the UI thread.
-pub async fn fetch_tile(key: TileKey, style: Arc<StyleSpec>) -> Result<CompiledTile, FetchError> {
-    on_background(fetch_and_decode(key, style))
+/// decode, then style filtering/coloring), off the UI thread. `is_wanted` is asked before each
+/// stage: a fast zoom queues hundreds of tiles, and without it the ones still on screen waited
+/// seconds behind levels already zoomed past (disk reads share the small blocking pool with
+/// decoding).
+pub async fn fetch_tile(
+    key: TileKey,
+    style: Arc<StyleSpec>,
+    is_wanted: impl Fn() -> bool + Send + Sync + 'static,
+) -> Result<CompiledTile, FetchError> {
+    on_background(fetch_and_decode(key, style, is_wanted))
         .await
         .unwrap_or(Err(FetchError::TaskFailed))
 }
 
-async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<CompiledTile, FetchError> {
+async fn fetch_and_decode(
+    key: TileKey,
+    style: Arc<StyleSpec>,
+    is_wanted: impl Fn() -> bool + Sync,
+) -> Result<CompiledTile, FetchError> {
+    if !is_wanted() {
+        return Err(FetchError::Obsolete);
+    }
     let io_start = std::time::Instant::now();
     let mut template = style.tile_url_for(key).to_string();
-    let (data, from_disk) = match fetch_tile_io(key, &template).await {
+    let (data, from_disk) = match fetch_tile_io(key, &template, &is_wanted).await {
         // The primary source down or missing this tile: the fallback has the same schema.
         Err(err) if template == style.tile_url_template => {
             match &style.fallback_tile_url_template {
@@ -86,7 +100,7 @@ async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<Compile
                     let (z, x, y) = key;
                     log::debug!("[fetch {z}/{x}/{y}] {err:?}, trying the fallback source");
                     template = fallback.clone();
-                    fetch_tile_io(key, &template).await?
+                    fetch_tile_io(key, &template, &is_wanted).await?
                 }
                 None => return Err(err),
             }
@@ -98,6 +112,9 @@ async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<Compile
         let (z, x, y) = key;
         log::debug!("[fetch {z}/{x}/{y}] io {io_ms} ms (disk cache or network)");
     }
+    if !is_wanted() {
+        return Err(FetchError::Obsolete);
+    }
     match decode_tile(data, style.clone(), key).await {
         // A corrupt cached copy (e.g. a write cut short) would otherwise fail this tile on every
         // run, forever: drop it and fetch the tile again.
@@ -105,7 +122,7 @@ async fn fetch_and_decode(key: TileKey, style: Arc<StyleSpec>) -> Result<Compile
             if let Some(path) = tile_cache_path(&template, key) {
                 let _ = tokio::fs::remove_file(&path).await;
             }
-            let (data, _) = fetch_tile_io(key, &template).await?;
+            let (data, _) = fetch_tile_io(key, &template, &is_wanted).await?;
             decode_tile(data, style, key).await
         }
         result => result,
@@ -168,7 +185,11 @@ async fn decode_tile(
 }
 
 /// The tile's bytes, from the disk cache when present (second value `true`), else the network.
-async fn fetch_tile_io(key: TileKey, tile_url_template: &str) -> Result<(Bytes, bool), FetchError> {
+async fn fetch_tile_io(
+    key: TileKey,
+    tile_url_template: &str,
+    is_wanted: &(dyn Fn() -> bool + Sync),
+) -> Result<(Bytes, bool), FetchError> {
     let (z, x, y) = key;
     let path = tile_cache_path(tile_url_template, key);
 
@@ -176,6 +197,9 @@ async fn fetch_tile_io(key: TileKey, tile_url_template: &str) -> Result<(Bytes, 
         && let Ok(data) = tokio::fs::read(path).await
     {
         return Ok((Bytes::from(data), true));
+    }
+    if !is_wanted() {
+        return Err(FetchError::Obsolete);
     }
 
     let url = tile_url_template
@@ -389,4 +413,6 @@ pub enum FetchError {
     Http(u16),
     InvalidData,
     TaskFailed,
+    /// Dropped unfetched: the view moved on before its turn came (see [`fetch_tile`]).
+    Obsolete,
 }

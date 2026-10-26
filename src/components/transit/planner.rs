@@ -9,7 +9,7 @@ use std::{
 
 use freya::{icons::lucide, prelude::*};
 
-use crate::mobile::{Haptic, SheetScroll, TOUCH, haptic, tap_padding, text_size, use_screen};
+use crate::mobile::{Haptic, TOUCH, haptic, tap_padding, text_size, use_screen};
 use map_component::{
     OverlayPath, OverlayStop, RouteOverlay,
     util::{tiles::background_delay, viewport::center_to_lonlat},
@@ -485,7 +485,7 @@ struct Itineraries {
 
 impl Component for Itineraries {
     fn render(&self) -> impl IntoElement {
-        // The sheet's scroll position, for its pull-to-close (see `mobile::SheetScroll`).
+        // The sheet's scroll position, for its pull-to-close (see `SheetScroll`).
         let scroll = use_consume::<SheetScroll>();
         let transit = use_consume::<TransitController>();
         let state = use_state(|| PlanLoad::Loading);

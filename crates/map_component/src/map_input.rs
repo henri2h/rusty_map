@@ -96,6 +96,21 @@ pub struct MapInputState {
     /// Fired when a tap hits a rail/transit line (only while the style keeps their geometry,
     /// see `StyleSpec::pick_transit_lines`).
     pub on_line_tapped: Option<EventHandler<TappedLine>>,
+    /// Host layers (see `overlay::MapLayer`), whose icons are hit-tested after markers.
+    pub layers: State<Vec<Rc<crate::overlay::MapLayer>>>,
+    pub on_item_tapped: Option<EventHandler<(u64, u64)>>,
+    /// Fired with the pointer's position while it moves over the map (not while dragging).
+    pub on_hover: Option<EventHandler<Option<MapHover>>>,
+}
+
+/// Where the pointer is over the map.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapHover {
+    pub lon: f64,
+    pub lat: f64,
+    /// Pointer position in map-local pixels (e.g. to place a tooltip).
+    pub x: f32,
+    pub y: f32,
 }
 
 pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData>) + 'static {
@@ -111,6 +126,7 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
     let initial_touch = s.initial_touch;
     let zoom = s.zoom;
     let viewport_size = s.viewport_size;
+    let on_hover = s.on_hover.clone();
 
     move |event: Event<MouseEventData>| {
         // Element-local, like `PlacedLabel::rect` (canvas space) — window coordinates only
@@ -126,6 +142,13 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
             }
             *last = time::Instant::now();
             drop(last);
+
+            if let Some(handler) = &on_hover {
+                let viewport = Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
+                let (world_x, world_y) = viewport.screen_to_world(pos.x as f32, pos.y as f32);
+                let (lon, lat) = world_to_lonlat(world_x, world_y);
+                handler.call(Some(MapHover { lon, lat, x: pos.x as f32, y: pos.y as f32 }));
+            }
 
             let is_over_icon = placed_labels.borrow().iter().rev().any(|p| {
                 p.sprite.is_some()
@@ -214,6 +237,8 @@ pub fn build_on_global_pointer_up(
     let on_marker_tapped = s.on_marker_tapped.clone();
     let pins = s.pins;
     let on_pin_tapped = s.on_pin_tapped.clone();
+    let layers = s.layers;
+    let on_item_tapped = s.on_item_tapped.clone();
     let tile_cache = s.tile_cache.clone();
     let viewport_size = s.viewport_size;
     move |event: Event<PointerEventData>| {
@@ -230,7 +255,12 @@ pub fn build_on_global_pointer_up(
             return;
         }
 
-        let pos = event.element_location();
+        // A global event's `element_location` isn't relative to the map: rebase the window
+        // position onto the map's area so it matches `initial_touch` (element-local). They only
+        // agreed while the map sat at the window's top-left corner.
+        let origin = viewport_size.peek().origin;
+        let global = event.global_location();
+        let pos = CursorPoint::new(global.x - origin.x as f64, global.y - origin.y as f64);
         let start = *initial_touch.peek();
         let moved = ((pos.x - start.x).powi(2) + (pos.y - start.y).powi(2)).sqrt();
         if moved >= 4.0 {
@@ -273,6 +303,16 @@ pub fn build_on_global_pointer_up(
                 crate::overlay::marker_at(&set, &viewport, *zoom.peek(), pos.x as f32, pos.y as f32)
             {
                 handler.call(id);
+                return;
+            }
+        }
+        if let Some(handler) = &on_item_tapped {
+            let viewport =
+                Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
+            let hit =
+                crate::overlay::item_at(&layers.peek(), &viewport, pos.x as f32, pos.y as f32);
+            if let Some(hit) = hit {
+                handler.call(hit);
                 return;
             }
         }

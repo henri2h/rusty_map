@@ -336,3 +336,415 @@ pub(crate) fn draw_markers(
         }
     }
 }
+
+/// One host-drawn shape, in world coordinates (see `viewport::lonlat_to_world`). Grouped into a
+/// [`MapLayer`] and set through `MapController::set_layer`.
+#[derive(Clone, PartialEq)]
+pub enum MapItem {
+    Polyline {
+        points: Vec<(f64, f64)>,
+        color: Color,
+        /// Screen pixels.
+        width: f32,
+        dashed: bool,
+    },
+    /// Closed area, e.g. an isochrone.
+    Polygon {
+        points: Vec<(f64, f64)>,
+        fill: Option<Color>,
+        /// Color and screen-pixel width.
+        stroke: Option<(Color, f32)>,
+    },
+    /// Tappable symbol, reported through `MapComponent::on_item_tapped` by `id`.
+    Icon {
+        id: u64,
+        point: (f64, f64),
+        glyph: IconGlyph,
+        /// Degrees clockwise from north.
+        rotation_deg: f32,
+        color: Color,
+        size_px: f32,
+    },
+    /// Text centered on `point`, with a white halo.
+    Label {
+        point: (f64, f64),
+        text: String,
+        color: Color,
+        size_px: f32,
+    },
+}
+
+/// The symbol of a [`MapItem::Icon`], pointing north before rotation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IconGlyph {
+    /// Top view of a sailing boat hull.
+    Boat,
+    Dot,
+    Arrow,
+}
+
+fn lonlat_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    points
+        .iter()
+        .map(|&(lon, lat)| lonlat_to_world(lon, lat))
+        .collect()
+}
+
+impl MapItem {
+    pub fn polyline_lonlat(points: &[(f64, f64)], color: Color, width: f32, dashed: bool) -> Self {
+        Self::Polyline {
+            points: lonlat_points(points),
+            color,
+            width,
+            dashed,
+        }
+    }
+
+    pub fn polygon_lonlat(
+        points: &[(f64, f64)],
+        fill: Option<Color>,
+        stroke: Option<(Color, f32)>,
+    ) -> Self {
+        Self::Polygon {
+            points: lonlat_points(points),
+            fill,
+            stroke,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn icon_lonlat(
+        id: u64,
+        lon: f64,
+        lat: f64,
+        glyph: IconGlyph,
+        rotation_deg: f32,
+        color: Color,
+        size_px: f32,
+    ) -> Self {
+        Self::Icon {
+            id,
+            point: lonlat_to_world(lon, lat),
+            glyph,
+            rotation_deg,
+            color,
+            size_px,
+        }
+    }
+
+    pub fn label_lonlat(
+        lon: f64,
+        lat: f64,
+        text: impl Into<String>,
+        color: Color,
+        size_px: f32,
+    ) -> Self {
+        Self::Label {
+            point: lonlat_to_world(lon, lat),
+            text: text.into(),
+            color,
+            size_px,
+        }
+    }
+}
+
+/// A group of [`MapItem`]s the host replaces as a whole, drawn in order above the route overlay
+/// and below markers.
+#[derive(Clone, PartialEq)]
+pub struct MapLayer {
+    pub id: u64,
+    pub items: Vec<MapItem>,
+    pub visible: bool,
+}
+
+impl MapLayer {
+    pub fn new(id: u64, items: Vec<MapItem>) -> Self {
+        Self {
+            id,
+            items,
+            visible: true,
+        }
+    }
+}
+
+/// Whether the screen box around `points`, grown by `pad`, overlaps the canvas.
+fn on_screen(points: &[(f32, f32)], pad: f32, size: (f32, f32)) -> bool {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in points {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    max_x >= -pad && max_y >= -pad && min_x <= size.0 + pad && min_y <= size.1 + pad
+}
+
+fn label_font(size: f32) -> freya::engine::prelude::Font {
+    use freya::engine::prelude::{Font, FontMgr, FontStyle, Typeface};
+    static TYPEFACE: std::sync::OnceLock<Typeface> = std::sync::OnceLock::new();
+    let typeface = TYPEFACE.get_or_init(|| {
+        let mgr = FontMgr::new();
+        mgr.match_family_style("Noto Sans", FontStyle::bold())
+            .or_else(|| mgr.legacy_make_typeface(None, FontStyle::bold()))
+            .expect("system font manager always yields some typeface")
+    });
+    Font::from_typeface(typeface.clone(), size)
+}
+
+fn glyph_path(glyph: IconGlyph, s: f32) -> freya::engine::prelude::Path {
+    let mut path = PathBuilder::new();
+    match glyph {
+        IconGlyph::Boat => {
+            path.move_to((0.0, -0.5 * s));
+            path.quad_to((0.25 * s, -0.22 * s), (0.21 * s, 0.15 * s));
+            path.line_to((0.16 * s, 0.5 * s));
+            path.line_to((-0.16 * s, 0.5 * s));
+            path.line_to((-0.21 * s, 0.15 * s));
+            path.quad_to((-0.25 * s, -0.22 * s), (0.0, -0.5 * s));
+        }
+        IconGlyph::Arrow => {
+            path.move_to((0.0, -0.5 * s));
+            path.line_to((0.38 * s, 0.4 * s));
+            path.line_to((0.0, 0.2 * s));
+            path.line_to((-0.38 * s, 0.4 * s));
+        }
+        IconGlyph::Dot => {
+            path.add_circle((0.0, 0.0), 0.3 * s, None);
+        }
+    }
+    path.close();
+    path.detach()
+}
+
+fn draw_icon(
+    canvas: &freya::engine::prelude::Canvas,
+    center: (f32, f32),
+    glyph: IconGlyph,
+    rotation_deg: f32,
+    color: Color,
+    s: f32,
+) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    canvas.save();
+    canvas.translate(center);
+    canvas.rotate(rotation_deg, None);
+
+    let shape = glyph_path(glyph, s);
+    let ring = if glyph == IconGlyph::Dot {
+        0.1 * s
+    } else {
+        (0.07 * s).max(1.5)
+    };
+    paint.set_color(SkColor::from_argb(60, 0, 0, 0));
+    canvas.draw_path(&shape.with_offset((0.0, 1.0)), &paint);
+    paint.set_color(SkColor::from(color));
+    canvas.draw_path(&shape, &paint);
+    paint.set_style(PaintStyle::Stroke);
+    paint.set_stroke_join(PaintJoin::Round);
+    paint.set_stroke_width(ring);
+    paint.set_color(SkColor::WHITE);
+    canvas.draw_path(&shape, &paint);
+
+    if glyph == IconGlyph::Boat {
+        // Mainsail let out to starboard from the mast.
+        let mut sail = PathBuilder::new();
+        sail.move_to((0.0, -0.18 * s));
+        sail.quad_to((0.16 * s, 0.08 * s), (0.07 * s, 0.38 * s));
+        sail.line_to((0.0, -0.18 * s));
+        sail.close();
+        let sail = sail.detach();
+        paint.set_style(PaintStyle::Fill);
+        paint.set_color(SkColor::from_argb(230, 255, 255, 255));
+        canvas.draw_path(&sail, &paint);
+    }
+    canvas.restore();
+}
+
+/// Draws the visible `layers` in order, skipping items fully off the `size` canvas.
+pub(crate) fn draw_layers(
+    canvas: &freya::engine::prelude::Canvas,
+    layers: &[std::rc::Rc<MapLayer>],
+    viewport: &Viewport,
+    size: (f32, f32),
+) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_stroke_cap(PaintCap::Round);
+    paint.set_stroke_join(PaintJoin::Round);
+
+    let shape = |points: &[(f32, f32)], close: bool| {
+        let mut builder = PathBuilder::new();
+        builder.move_to(points[0]);
+        for &point in &points[1..] {
+            builder.line_to(point);
+        }
+        if close {
+            builder.close();
+        }
+        builder.detach()
+    };
+    let to_screen = |points: &[(f64, f64)]| -> Vec<(f32, f32)> {
+        points
+            .iter()
+            .map(|&(x, y)| viewport.world_to_screen(x, y))
+            .collect()
+    };
+
+    for item in layers
+        .iter()
+        .filter(|layer| layer.visible)
+        .flat_map(|layer| &layer.items)
+    {
+        match item {
+            MapItem::Polyline {
+                points,
+                color,
+                width,
+                dashed,
+            } => {
+                let points = to_screen(points);
+                if points.len() < 2 || !on_screen(&points, *width, size) {
+                    continue;
+                }
+                paint.set_style(PaintStyle::Stroke);
+                paint.set_stroke_width(*width);
+                paint.set_color(SkColor::from(*color));
+                if *dashed {
+                    paint.set_stroke_cap(PaintCap::Butt);
+                    paint.set_path_effect(PathEffect::dash(&[width * 3.0, width * 2.0], 0.0));
+                }
+                canvas.draw_path(&shape(&points, false), &paint);
+                paint.set_path_effect(None);
+                paint.set_stroke_cap(PaintCap::Round);
+            }
+            MapItem::Polygon {
+                points,
+                fill,
+                stroke,
+            } => {
+                let points = to_screen(points);
+                let pad = stroke.map_or(0.0, |(_, width)| width);
+                if points.len() < 3 || !on_screen(&points, pad, size) {
+                    continue;
+                }
+                let path = shape(&points, true);
+                if let Some(fill) = fill {
+                    paint.set_style(PaintStyle::Fill);
+                    paint.set_color(SkColor::from(*fill));
+                    canvas.draw_path(&path, &paint);
+                }
+                if let Some((color, width)) = stroke {
+                    paint.set_style(PaintStyle::Stroke);
+                    paint.set_stroke_width(*width);
+                    paint.set_color(SkColor::from(*color));
+                    canvas.draw_path(&path, &paint);
+                }
+            }
+            MapItem::Icon {
+                point,
+                glyph,
+                rotation_deg,
+                color,
+                size_px,
+                ..
+            } => {
+                let center = viewport.world_to_screen(point.0, point.1);
+                if on_screen(&[center], *size_px, size) {
+                    draw_icon(canvas, center, *glyph, *rotation_deg, *color, *size_px);
+                }
+            }
+            MapItem::Label {
+                point,
+                text,
+                color,
+                size_px,
+            } => {
+                let (x, y) = viewport.world_to_screen(point.0, point.1);
+                let reach = size_px * text.chars().count() as f32;
+                if !on_screen(&[(x, y)], reach, size) {
+                    continue;
+                }
+                let font = label_font(*size_px);
+                let Some(blob) = freya::engine::prelude::TextBlob::from_str(text, &font) else {
+                    continue;
+                };
+                let (advance, _) = font.measure_str(text, None);
+                let origin = (x - advance / 2.0, y + size_px * 0.35);
+                paint.set_style(PaintStyle::Stroke);
+                paint.set_stroke_width((size_px * 0.2).max(2.0));
+                paint.set_color(SkColor::from_argb(230, 255, 255, 255));
+                canvas.draw_text_blob(&blob, origin, &paint);
+                paint.set_style(PaintStyle::Fill);
+                paint.set_color(SkColor::from(*color));
+                canvas.draw_text_blob(&blob, origin, &paint);
+            }
+        }
+    }
+}
+
+/// The `(layer id, item id)` of the [`MapItem::Icon`] under screen point (`x`, `y`), if any,
+/// topmost (last drawn) first.
+pub fn item_at(
+    layers: &[std::rc::Rc<MapLayer>],
+    viewport: &Viewport,
+    x: f32,
+    y: f32,
+) -> Option<(u64, u64)> {
+    layers
+        .iter()
+        .rev()
+        .filter(|layer| layer.visible)
+        .find_map(|layer| {
+            layer.items.iter().rev().find_map(|item| {
+                let MapItem::Icon {
+                    id, point, size_px, ..
+                } = item
+                else {
+                    return None;
+                };
+                let (cx, cy) = viewport.world_to_screen(point.0, point.1);
+                let reach = size_px / 2.0 + 4.0;
+                ((cx - x).powi(2) + (cy - y).powi(2) <= reach * reach).then_some((layer.id, *id))
+            })
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use torin::geometry::CursorPoint;
+
+    use super::*;
+
+    fn icon(id: u64, point: (f64, f64)) -> MapItem {
+        MapItem::Icon {
+            id,
+            point,
+            glyph: IconGlyph::Boat,
+            rotation_deg: 0.0,
+            color: Color::BLACK,
+            size_px: 20.0,
+        }
+    }
+
+    #[test]
+    fn item_at_hits_topmost_icon() {
+        let viewport = Viewport::new(CursorPoint::zero(), 12.0, 14);
+        let point = viewport.screen_to_world(100.0, 100.0);
+        let far = viewport.screen_to_world(400.0, 400.0);
+        let layers = vec![
+            Rc::new(MapLayer::new(1, vec![icon(10, point)])),
+            Rc::new(MapLayer::new(2, vec![icon(20, point), icon(21, far)])),
+        ];
+        assert_eq!(item_at(&layers, &viewport, 102.0, 98.0), Some((2, 20)));
+        assert_eq!(item_at(&layers, &viewport, 401.0, 400.0), Some((2, 21)));
+        assert_eq!(item_at(&layers, &viewport, 250.0, 250.0), None);
+
+        let mut hidden = MapLayer::new(2, vec![icon(20, point)]);
+        hidden.visible = false;
+        let layers = vec![layers[0].clone(), Rc::new(hidden)];
+        assert_eq!(item_at(&layers, &viewport, 100.0, 100.0), Some((1, 10)));
+    }
+}

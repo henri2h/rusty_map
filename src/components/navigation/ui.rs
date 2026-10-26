@@ -17,7 +17,7 @@ use crate::{
         Endpoint, SOURCES_URL, clock_time, duration_text, show_on_map, status_line,
     },
     location::{self, Reading},
-    mobile::{Haptic, SheetScroll, TOUCH, haptic, is_back, tap_padding, text_size, use_screen},
+    mobile::{Haptic, TOUCH, haptic, is_back, tap_padding, text_size, use_screen},
 };
 
 use super::{

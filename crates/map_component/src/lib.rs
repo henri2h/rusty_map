@@ -11,9 +11,10 @@ pub mod style;
 pub mod util;
 
 pub use map_controller::{Insets, MapController};
-pub use map_input::{MapTap, TappedFeature, TappedLine};
+pub use map_input::{MapHover, MapTap, TappedFeature, TappedLine};
 pub use overlay::{
-    MapMarker, MarkerGlyph, MarkerSet, OverlayPath, OverlayStop, RouteOverlay, UserLocation,
+    IconGlyph, MapItem, MapLayer, MapMarker, MarkerGlyph, MarkerSet, OverlayPath, OverlayStop,
+    RouteOverlay, UserLocation,
 };
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -53,6 +54,9 @@ pub struct MapComponent {
     /// for picking (`StyleSpec::pick_transit_lines`, the transit overlay). Same not-compared
     /// reasoning as `on_place_tapped`.
     on_line_tapped: Option<EventHandler<TappedLine>>,
+    on_item_tapped: Option<EventHandler<(u64, u64)>>,
+    /// Pointer position while hovering (`None` when it leaves). Not compared, like the taps.
+    on_hover: Option<EventHandler<Option<MapHover>>>,
 }
 
 impl PartialEq for MapComponent {
@@ -76,6 +80,8 @@ impl MapComponent {
             on_marker_tapped: None,
             on_pin_tapped: None,
             on_line_tapped: None,
+            on_item_tapped: None,
+            on_hover: None,
         }
     }
 
@@ -93,6 +99,19 @@ impl MapComponent {
     /// Fired with a [`MapController::pins`] marker's id when a tap lands on it.
     pub fn on_pin_tapped(mut self, handler: impl FnMut(u64) + 'static) -> Self {
         self.on_pin_tapped = Some(EventHandler::new(handler));
+        self
+    }
+
+    /// Fired with `(layer id, item id)` when a tap lands on a [`MapItem::Icon`].
+    pub fn on_item_tapped(mut self, handler: impl FnMut((u64, u64)) + 'static) -> Self {
+        self.on_item_tapped = Some(EventHandler::new(handler));
+        self
+    }
+
+    /// Fired with the pointer's lon/lat while it moves over the map (throttled to the frame
+    /// rate, not while dragging), and with `None` when it leaves the map.
+    pub fn on_hover(mut self, handler: impl FnMut(Option<MapHover>) + 'static) -> Self {
+        self.on_hover = Some(EventHandler::new(handler));
         self
     }
 
@@ -135,6 +154,7 @@ impl Component for MapComponent {
         let markers_state = self.controller.markers;
         let pins_state = self.controller.pins;
         let user_location_state = self.controller.user_location;
+        let layers_state = self.controller.layers;
         let cursor = *self.controller.cursor.read();
         let style = self.controller.style.clone();
         let platform = self.controller.platform.clone();
@@ -213,6 +233,64 @@ impl Component for MapComponent {
             }
         });
 
+        // Fetch and bake for the view whenever it moves, whoever moved it: input handlers do too,
+        // but the host also sets it directly (a picked search result, a saved view, following
+        // the location) — which used to leave the new area blank until the next touch.
+        use_side_effect({
+            let tile_cache = tile_cache.clone();
+            let zoom_dep_cache = zoom_dep_cache.clone();
+            let style = style.clone();
+            let platform = platform.clone();
+            move || {
+                let (center, zoom) = (*center.read(), *zoom.read());
+                let size = viewport_size.peek().size;
+                if size.width <= 0.0 || size.height <= 0.0 {
+                    return;
+                }
+                ensure_view(
+                    center,
+                    zoom,
+                    size,
+                    &tile_cache,
+                    &zoom_dep_cache,
+                    &style.borrow(),
+                    &platform,
+                );
+                platform.send(UserEvent::RequestRedraw);
+            }
+        });
+
+        // The paint loop asks for this when it finds a visible tile or bake missing for the
+        // current view (see `ZoomDepCacheData::request_view_refresh`): it can't start one itself.
+        use_hook({
+            let tile_cache = tile_cache.clone();
+            let zoom_dep_cache = zoom_dep_cache.clone();
+            let style = style.clone();
+            let platform = platform.clone();
+            move || {
+                spawn(async move {
+                    loop {
+                        zoom_dep_cache.view_refresh_requested().await;
+                        // Lets a burst of frames (a zoom gesture) settle into one pass.
+                        util::tiles::background_delay(std::time::Duration::from_millis(150)).await;
+                        let size = viewport_size.peek().size;
+                        if size.width <= 0.0 || size.height <= 0.0 {
+                            continue;
+                        }
+                        ensure_view(
+                            *center.peek(),
+                            *zoom.peek(),
+                            size,
+                            &tile_cache,
+                            &zoom_dep_cache,
+                            &style.borrow(),
+                            &platform,
+                        );
+                    }
+                });
+            }
+        });
+
         // initial fetch
         // fetch style
         use_hook(|| {
@@ -264,6 +342,9 @@ impl Component for MapComponent {
             pins: pins_state,
             on_pin_tapped: self.on_pin_tapped.clone(),
             on_line_tapped: self.on_line_tapped.clone(),
+            layers: layers_state,
+            on_item_tapped: self.on_item_tapped.clone(),
+            on_hover: self.on_hover.clone(),
         };
 
         // On events
@@ -296,6 +377,7 @@ impl Component for MapComponent {
                         let markers = markers_state.peek().clone();
                         let pins = pins_state.peek().clone();
                         let user_location = *user_location_state.peek();
+                        let layers = layers_state.peek().clone();
                         let style_now = style.borrow().clone();
 
                         paint_map(
@@ -313,6 +395,19 @@ impl Component for MapComponent {
                             marker_world,
                             route_overlay.as_deref(),
                         );
+                        if !layers.is_empty() {
+                            let viewport = util::viewport::Viewport::new(
+                                *center.peek(),
+                                *zoom.peek(),
+                                style_now.max_real_zoom,
+                            );
+                            overlay::draw_layers(
+                                context.canvas,
+                                &layers,
+                                &viewport,
+                                (context.size.width, context.size.height),
+                            );
+                        }
                         // Over everything, labels included: markers are what the user is
                         // looking for when they're shown.
                         for markers in [pins, markers].into_iter().flatten() {
@@ -366,6 +461,14 @@ impl Component for MapComponent {
                         }
                     })
                     .on_mouse_move(on_mouse_move)
+                    .on_pointer_leave({
+                        let on_hover = self.on_hover.clone();
+                        move |_| {
+                            if let Some(handler) = &on_hover {
+                                handler.call(None);
+                            }
+                        }
+                    })
                     .on_pointer_down(on_pointer_down)
                     .on_global_pointer_up(on_global_pointer_up)
                     .on_touch_start(touch(&on_touch))

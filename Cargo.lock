@@ -1617,6 +1617,7 @@ dependencies = [
 name = "freya-android"
 version = "0.5.0-rc.9"
 dependencies = [
+ "freya-clipboard",
  "freya-components",
  "freya-core",
  "freya-winit",

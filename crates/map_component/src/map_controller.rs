@@ -4,7 +4,7 @@ use freya::prelude::*;
 use torin::geometry::{Area, CursorPoint};
 
 use crate::{
-    overlay::{MarkerSet, RouteOverlay, UserLocation},
+    overlay::{MapLayer, MarkerSet, RouteOverlay, UserLocation},
     style::{self, StyleSpec},
     util::{
         renderer::TILE_SIZE,
@@ -49,6 +49,8 @@ pub struct MapController {
     pub pins: State<Option<Rc<MarkerSet>>>,
     /// The device's position (see [`UserLocation`]); `None` draws nothing.
     pub user_location: State<Option<UserLocation>>,
+    /// Host-drawn layers (see [`MapLayer`]), above the route overlay and below markers.
+    pub layers: State<Vec<Rc<MapLayer>>>,
 
     /// Mouse cursor over the map, e.g. a crosshair while the host waits for the user to pick a
     /// point. `None` keeps the default.
@@ -73,6 +75,7 @@ impl PartialEq for MapController {
             && self.markers == other.markers
             && self.pins == other.pins
             && self.user_location == other.user_location
+            && self.layers == other.layers
             && self.cursor == other.cursor
             && self.sprites == other.sprites
             && Rc::ptr_eq(&self.style, &other.style)
@@ -95,6 +98,7 @@ impl MapController {
         let pins = use_state::<Option<Rc<MarkerSet>>>(|| None);
         let cursor = use_state::<Option<CursorIcon>>(|| None);
         let user_location = use_state::<Option<UserLocation>>(|| None);
+        let layers = use_state::<Vec<Rc<MapLayer>>>(Vec::new);
         let sprites = use_state::<Option<Rc<SpriteSheet>>>(|| None);
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
@@ -109,6 +113,7 @@ impl MapController {
             markers,
             pins,
             user_location,
+            layers,
             cursor,
             sprites,
             style,
@@ -144,6 +149,30 @@ impl MapController {
             self.pins.set(pins.map(Rc::new));
             self.platform.send(UserEvent::RequestRedraw);
         }
+    }
+
+    /// Replaces the layer with `layer.id`, or appends it on top, and repaints.
+    pub fn set_layer(&mut self, layer: MapLayer) {
+        let layer = Rc::new(layer);
+        let mut layers = self.layers.write();
+        match layers.iter_mut().find(|existing| existing.id == layer.id) {
+            Some(existing) => *existing = layer,
+            None => layers.push(layer),
+        }
+        drop(layers);
+        self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Removes the layer with `id` and repaints.
+    pub fn remove_layer(&mut self, id: u64) {
+        self.layers.write().retain(|layer| layer.id != id);
+        self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Removes every layer and repaints.
+    pub fn clear_layers(&mut self) {
+        self.layers.set(Vec::new());
+        self.platform.send(UserEvent::RequestRedraw);
     }
 
     /// Moves and zooms the view so the world-coordinate box `bounds` fills the part of the map

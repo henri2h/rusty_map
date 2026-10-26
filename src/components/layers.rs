@@ -7,9 +7,7 @@ use bytes::Bytes;
 use freya::{icons::lucide, prelude::*};
 use torin::position::Position;
 
-use crate::mobile::{
-    Haptic, Pull, Screen, haptic, is_back, on_pull_end, on_pull_move, on_pull_start, use_screen,
-};
+use crate::mobile::{Haptic, Screen, haptic, is_back, use_screen};
 
 const TEXT: Color = Color::from_rgb(32, 33, 36);
 const TEXT_MUTED: Color = Color::from_rgb(95, 99, 104);
@@ -49,8 +47,10 @@ impl Component for LayersModal {
     fn render(&self) -> impl IntoElement {
         // Hooks before the early return: their count must not change between renders.
         let screen = use_screen();
-        let pull = use_state(Pull::default);
-        if !*self.open.read() {
+        let pull = use_sheet_pull();
+        let open = *self.open.read();
+        // The sheet stays mounted to play its close animation.
+        if !open && !screen.compact {
             return rect().into_element();
         }
         layers_modal(
@@ -111,13 +111,13 @@ fn layers_modal(
     mut open: State<bool>,
     screen: Screen,
     top: f32,
-    pull: State<Pull>,
+    pull: SheetPull,
 ) -> Element {
     // Picking one tile switches every layer to match: on for its own, off for the rest.
     let show_only = |shown: Option<usize>| {
         let layers = layers.to_vec();
         move || {
-            if pull.peek().moved {
+            if pull.moved() {
                 return;
             }
             for (index, layer) in layers.iter().enumerate() {
@@ -156,60 +156,27 @@ fn layers_modal(
         .color(TEXT)
         .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32));
 
-    // The bottom sheet's grab bar: says it pulls down to close, as the whole sheet does (so do a
-    // press outside and back). The desktop card closes the same way, minus the bar and pull.
-    let mut close = open;
-    let grab_bar = screen.compact.then(|| {
-        rect()
-            .width(Size::fill())
-            .padding((0.0f32, 0.0f32, 12.0f32, 0.0f32))
-            .center()
-            .on_press(move |e: Event<PressEventData>| {
-                e.stop_propagation();
+    // Compact: a bottom sheet, pulled down anywhere to close (so do its grab bar, a press
+    // outside and back).
+    if screen.compact {
+        let shown = *open.read();
+        return BottomSheet::new()
+            .on_close_request(move |_| {
                 haptic(Haptic::Press);
-                close.set(false);
+                open.set(false);
             })
-            .child(
-                rect()
-                    .width(Size::px(36.0))
-                    .height(Size::px(4.0))
-                    .corner_radius(2.0f32)
-                    .background(DIVIDER),
-            )
-    });
-
-    let card = if screen.compact {
-        rect()
-            .position(
-                Position::new_absolute()
-                    .bottom(-pull.read().offset)
-                    .left(0.),
-            )
-            .width(Size::window_percent(100.))
-            .padding((10.0, 20.0, 20.0 + screen.insets.bottom, 20.0))
-            .on_pointer_down(on_pull_start(pull))
-            .corner_radius((16.0f32, 16.0f32, 0.0f32, 0.0f32))
-    } else {
-        rect()
-            .position(Position::new_absolute().top(top + 40.).right(12.))
-            .padding(16.0f32)
-            .corner_radius(12.0f32)
-    };
-    let card = card
-        .background(Color::WHITE)
-        .shadow((
-            0.0f32,
-            2.0f32,
-            12.0f32,
-            0.0f32,
-            Color::from_argb(70, 0, 0, 0),
-        ))
-        .vertical()
-        // A press inside the card must not reach the scrim, which closes the modal.
-        .on_press(|e: Event<PressEventData>| e.stop_propagation())
-        .maybe_child(grab_bar)
-        .child(header)
-        .child(tiles);
+            .pull(pull)
+            .layer(Layer::OverlayLevel(4))
+            .bottom_inset(screen.insets.bottom)
+            .padding((0.0, 20.0, 20.0, 20.0))
+            .background(Color::WHITE)
+            .color(TEXT)
+            .handle_color(DIVIDER)
+            .backdrop(Color::from_argb(70, 0, 0, 0))
+            .shadow(Color::from_argb(70, 0, 0, 0))
+            .maybe(shown, |sheet| sheet.child(header).child(tiles))
+            .into_element();
+    }
 
     // Over the whole window: a press outside the card closes it, and the map under it can't be
     // panned meanwhile.
@@ -218,20 +185,31 @@ fn layers_modal(
         .width(Size::window_percent(100.))
         .height(Size::window_percent(100.))
         .layer(Layer::OverlayLevel(4))
-        .background(if screen.compact {
-            Color::from_argb(70, 0, 0, 0)
-        } else {
-            Color::TRANSPARENT
-        })
         .on_press(move |_: Event<PressEventData>| open.set(false))
-        .on_global_pointer_move(on_pull_move(pull))
-        .on_global_pointer_up(on_pull_end(pull, move || open.set(false)))
         .on_global_key_down(move |e: Event<KeyboardEventData>| {
             if is_back(&e.key) {
                 open.set(false);
             }
         })
-        .child(card)
+        .child(
+            rect()
+                .position(Position::new_absolute().top(top + 40.).right(12.))
+                .padding(16.0f32)
+                .corner_radius(12.0f32)
+                .background(Color::WHITE)
+                .shadow((
+                    0.0f32,
+                    2.0f32,
+                    12.0f32,
+                    0.0f32,
+                    Color::from_argb(70, 0, 0, 0),
+                ))
+                .vertical()
+                // A press inside the card must not reach the scrim, which closes the modal.
+                .on_press(|e: Event<PressEventData>| e.stop_propagation())
+                .child(header)
+                .child(tiles),
+        )
         .into_element()
 }
 
