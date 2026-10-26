@@ -50,16 +50,20 @@ hotreload = ["freya/hotreload"]
 perf-overlay = ["dep:freya-metrics-plugin"]
 
 [dependencies]
-freya = { path = "../freya/crates/freya", features = [
+
+freya = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", features = [
   "engine",
   "material-design",
   "icons",
 ] }
-freya-icons = { path = "../freya/crates/freya-icons", features = ["lucide"] }
+
+freya-icons = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", features = [
+  "lucide",
+] }
 map_component = { path = "crates/map_component" }
-freya-router = { path = "../freya/crates/freya-router" }
-torin = { path = "../freya/crates/torin" }
-freya-metrics-plugin = { path = "../freya/crates/freya-metrics-plugin", optional = true }
+freya-router = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
+torin = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
+freya-metrics-plugin = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", optional = true }
 
 mvt-reader = "2.4.0"
 geo-types = "0.7"
@@ -68,7 +72,12 @@ reqwest = { version = "0.12", features = [
   "rustls-tls",
   "gzip",
 ], default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "fs",
+  "sync",
+] }
 bytes = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -77,8 +86,8 @@ dirs = "6"
 env_logger = "0.11"
 
 [target.'cfg(target_os = "android")'.dependencies]
-freya-android = { path = "../freya/crates/freya-android" }
-freya-winit = { path = "../freya/crates/freya-winit" }
+freya-android = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
+freya-winit = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
 android_logger = "0.15"
 # Calls into `MainActivity`: location updates, haptics (see `src/mobile.rs`).
 jni = "0.21"
