@@ -1597,51 +1597,21 @@ dependencies = [
 [[package]]
 name = "freya"
 version = "0.5.0-rc.9"
-dependencies = [
- "cfg-if",
- "freya-android 0.5.0-rc.9",
- "freya-animation 0.5.0-rc.9",
- "freya-clipboard 0.5.0-rc.9",
- "freya-components 0.5.0-rc.9",
- "freya-core 0.5.0-rc.9",
- "freya-edit 0.5.0-rc.9",
- "freya-engine 0.5.0-rc.9",
- "freya-metrics-plugin 0.5.0-rc.9",
- "freya-winit 0.5.0-rc.9",
- "torin 0.5.0-rc.9",
-]
-
-[[package]]
-name = "freya"
-version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
  "cfg-if",
- "freya-android 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-animation 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-clipboard 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-components 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-edit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-engine 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-android",
+ "freya-animation",
+ "freya-clipboard",
+ "freya-components",
+ "freya-core",
+ "freya-edit",
+ "freya-engine",
  "freya-icons",
  "freya-material-design",
- "freya-metrics-plugin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-winit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
-]
-
-[[package]]
-name = "freya-android"
-version = "0.5.0-rc.9"
-dependencies = [
- "freya-clipboard 0.5.0-rc.9",
- "freya-components 0.5.0-rc.9",
- "freya-core 0.5.0-rc.9",
- "freya-winit 0.5.0-rc.9",
- "jni 0.22.4",
- "tracing",
- "winit",
+ "freya-metrics-plugin",
+ "freya-winit",
+ "torin",
 ]
 
 [[package]]
@@ -1649,10 +1619,10 @@ name = "freya-android"
 version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
- "freya-clipboard 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-components 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-winit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-clipboard",
+ "freya-components",
+ "freya-core",
+ "freya-winit",
  "jni 0.22.4",
  "tracing",
  "winit",
@@ -1661,26 +1631,10 @@ dependencies = [
 [[package]]
 name = "freya-animation"
 version = "0.5.0-rc.9"
-dependencies = [
- "easer",
- "freya-core 0.5.0-rc.9",
-]
-
-[[package]]
-name = "freya-animation"
-version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
  "easer",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
-]
-
-[[package]]
-name = "freya-clipboard"
-version = "0.5.0-rc.9"
-dependencies = [
- "copypasta",
- "freya-core 0.5.0-rc.9",
+ "freya-core",
 ]
 
 [[package]]
@@ -1689,29 +1643,7 @@ version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
  "copypasta",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
-]
-
-[[package]]
-name = "freya-components"
-version = "0.5.0-rc.9"
-dependencies = [
- "accesskit",
- "anyhow",
- "async-lock",
- "bytes",
- "cfg-if",
- "euclid",
- "freya-animation 0.5.0-rc.9",
- "freya-core 0.5.0-rc.9",
- "freya-edit 0.5.0-rc.9",
- "freya-engine 0.5.0-rc.9",
- "freya-sdk 0.5.0-rc.9",
- "futures-channel",
- "paste",
- "thiserror 2.0.18",
- "torin 0.5.0-rc.9",
- "tracing",
+ "freya-core",
 ]
 
 [[package]]
@@ -1725,45 +1657,16 @@ dependencies = [
  "bytes",
  "cfg-if",
  "euclid",
- "freya-animation 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-edit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-engine 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-sdk 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-animation",
+ "freya-core",
+ "freya-edit",
+ "freya-engine",
+ "freya-sdk",
  "futures-channel",
  "paste",
  "thiserror 2.0.18",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "torin",
  "tracing",
-]
-
-[[package]]
-name = "freya-core"
-version = "0.5.0-rc.9"
-dependencies = [
- "accesskit",
- "async-io",
- "bitflags 2.13.0",
- "blocking",
- "bytes",
- "cursor-icon",
- "freya-engine 0.5.0-rc.9",
- "futures-channel",
- "futures-lite",
- "futures-util",
- "generational-box",
- "hotpath",
- "itertools",
- "keyboard-types",
- "mundy",
- "paste",
- "pathgraph 0.5.0-rc.9",
- "ragnarok 0.5.0-rc.9",
- "rustc-hash",
- "smallvec",
- "torin 0.5.0-rc.9",
- "tracing",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -1778,7 +1681,7 @@ dependencies = [
  "bytes",
  "cursor-icon",
  "dioxus-devtools",
- "freya-engine 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-engine",
  "futures-channel",
  "futures-lite",
  "futures-util",
@@ -1788,26 +1691,13 @@ dependencies = [
  "keyboard-types",
  "mundy",
  "paste",
- "pathgraph 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "ragnarok 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "pathgraph",
+ "ragnarok",
  "rustc-hash",
  "smallvec",
  "subsecond",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "torin",
  "tracing",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "freya-edit"
-version = "0.5.0-rc.9"
-dependencies = [
- "bitflags 2.13.0",
- "freya-clipboard 0.5.0-rc.9",
- "freya-core 0.5.0-rc.9",
- "keyboard-types",
- "ropey",
- "torin 0.5.0-rc.9",
  "unicode-segmentation",
 ]
 
@@ -1817,19 +1707,12 @@ version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
  "bitflags 2.13.0",
- "freya-clipboard 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-clipboard",
+ "freya-core",
  "keyboard-types",
  "ropey",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "torin",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "freya-engine"
-version = "0.5.0-rc.9"
-dependencies = [
- "freya-skia-safe",
 ]
 
 [[package]]
@@ -1853,20 +1736,10 @@ name = "freya-material-design"
 version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
- "freya-animation 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-components 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
-]
-
-[[package]]
-name = "freya-metrics-plugin"
-version = "0.5.0-rc.9"
-dependencies = [
- "freya-core 0.5.0-rc.9",
- "freya-engine 0.5.0-rc.9",
- "freya-winit 0.5.0-rc.9",
- "tracing",
+ "freya-animation",
+ "freya-components",
+ "freya-core",
+ "torin",
 ]
 
 [[package]]
@@ -1874,9 +1747,9 @@ name = "freya-metrics-plugin"
 version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-engine 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-winit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-core",
+ "freya-engine",
+ "freya-winit",
  "tracing",
 ]
 
@@ -1885,7 +1758,7 @@ name = "freya-router"
 version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-core",
  "freya-router-macro",
  "rustversion",
  "url",
@@ -1906,16 +1779,9 @@ dependencies = [
 [[package]]
 name = "freya-sdk"
 version = "0.5.0-rc.9"
-dependencies = [
- "freya-core 0.5.0-rc.9",
-]
-
-[[package]]
-name = "freya-sdk"
-version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-core",
 ]
 
 [[package]]
@@ -1962,46 +1828,6 @@ dependencies = [
 [[package]]
 name = "freya-winit"
 version = "0.5.0-rc.9"
-dependencies = [
- "accesskit",
- "accesskit_winit",
- "ash",
- "ash-window",
- "bytes",
- "freya-clipboard 0.5.0-rc.9",
- "freya-components 0.5.0-rc.9",
- "freya-core 0.5.0-rc.9",
- "freya-engine 0.5.0-rc.9",
- "futures-channel",
- "futures-lite",
- "futures-util",
- "gl",
- "glutin",
- "glutin-winit",
- "hotpath",
- "image",
- "keyboard-types",
- "mundy",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
- "open",
- "ragnarok 0.5.0-rc.9",
- "raw-window-handle",
- "rfd",
- "rustc-hash",
- "softbuffer",
- "torin 0.5.0-rc.9",
- "tracing",
- "windows-sys 0.60.2",
- "winit",
-]
-
-[[package]]
-name = "freya-winit"
-version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 dependencies = [
  "accesskit",
@@ -2009,10 +1835,10 @@ dependencies = [
  "ash",
  "ash-window",
  "bytes",
- "freya-clipboard 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-components 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-core 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-engine 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-clipboard",
+ "freya-components",
+ "freya-core",
+ "freya-engine",
  "futures-channel",
  "futures-lite",
  "futures-util",
@@ -2029,12 +1855,12 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "open",
- "ragnarok 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "ragnarok",
  "raw-window-handle",
  "rfd",
  "rustc-hash",
  "softbuffer",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "torin",
  "tracing",
  "windows-sys 0.60.2",
  "winit",
@@ -2954,7 +2780,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "dirs",
- "freya 0.5.0-rc.9",
+ "freya",
  "freya-skia-safe",
  "geo-types",
  "log",
@@ -2965,7 +2791,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "torin 0.5.0-rc.9",
+ "torin",
 ]
 
 [[package]]
@@ -3719,10 +3545,6 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 [[package]]
 name = "pathgraph"
 version = "0.5.0-rc.9"
-
-[[package]]
-name = "pathgraph"
-version = "0.5.0-rc.9"
 source = "git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review#71bc2598e173031f3f7e48050ad73f4e1a3e27e3"
 
 [[package]]
@@ -4087,17 +3909,6 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
-
-[[package]]
-name = "ragnarok"
-version = "0.5.0-rc.9"
-dependencies = [
- "euclid",
- "hashbrown 0.16.1",
- "itertools",
- "rustc-hash",
- "tracing",
-]
 
 [[package]]
 name = "ragnarok"
@@ -4505,12 +4316,12 @@ dependencies = [
  "bytes",
  "dirs",
  "env_logger",
- "freya 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
- "freya-android 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya",
+ "freya-android",
  "freya-icons",
- "freya-metrics-plugin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-metrics-plugin",
  "freya-router",
- "freya-winit 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "freya-winit",
  "geo-types",
  "jni 0.21.1",
  "log",
@@ -4522,7 +4333,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "torin 0.5.0-rc.9 (git+https://github.com/henri2h/freya?branch=henri2h%2Fchanges-to-review)",
+ "torin",
  "winit",
 ]
 
@@ -5187,16 +4998,6 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
-
-[[package]]
-name = "torin"
-version = "0.5.0-rc.9"
-dependencies = [
- "euclid",
- "itertools",
- "rustc-hash",
- "tracing",
-]
 
 [[package]]
 name = "torin"
