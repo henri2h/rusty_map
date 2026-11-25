@@ -93,9 +93,9 @@ pub fn build_renderable_tile(decoded: DecodedTile, style: &StyleSpec) -> Rendera
     let source_layers = decoded
         .into_iter()
         .map(|(layer, features)| {
-            let keep_line_coords = if line_label_sources.contains(layer.name.as_str()) {
-                KeepCoords::All
-            } else if style.pick_transit_lines && layer.name == ROUTE_LINES_LAYER {
+            let keep_line_coords = if line_label_sources.contains(layer.name.as_str())
+                || (style.pick_transit_lines && layer.name == ROUTE_LINES_LAYER)
+            {
                 KeepCoords::All
             } else if style.pick_transit_lines && layer.name == TRANSIT_SOURCE_LAYER {
                 KeepCoords::TransitOnly

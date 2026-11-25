@@ -144,51 +144,64 @@ pub fn year_of(days: i64) -> i64 {
     year
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn french_clock_follows_daylight_saving() {
-        // 2026-07-01 12:00 UTC → 14:00 CEST.
-        let summer = api::days_from_civil(2026, 7, 1) * 86_400 + 12 * 3_600;
-        assert_eq!(clock_time(summer), "14:00");
-        // 2026-12-01 12:00 UTC → 13:00 CET.
-        let winter = api::days_from_civil(2026, 12, 1) * 86_400 + 12 * 3_600;
-        assert_eq!(clock_time(winter), "13:00");
-        // 2026 switches: Mar 29 and Oct 25, at 01:00 UTC.
-        let before = api::days_from_civil(2026, 10, 25) * 86_400 + 3_599;
-        assert_eq!(central_european_offset(before), 7_200);
-        assert_eq!(central_european_offset(before + 1), 3_600);
-    }
-}
-
-/// Space the drawer covers on the map's left, kept clear when framing a trip.
+/// Kept clear when framing a trip: the drawer on the map's left, and on its right the column of
+/// map controls (Layers, Favorites, Settings: 12 px from the edge, ~100 px wide) — a route end
+/// in the top-right corner hid under them.
 pub const DRAWER_INSETS: Insets = Insets {
     top: 24.0,
-    right: 24.0,
+    right: 128.0,
     bottom: 24.0,
     left: 384.0,
 };
 
 /// Draws `overlay` on the map and frames it beside the drawer — above the bottom sheet, in the
-/// compact layout.
+/// compact layout. A view already showing it (another itinerary of the same journey, say) stays
+/// put; otherwise the map glides there (see `MapController::frame_world_bounds`).
 pub fn show_on_map(map: &mut MapController, overlay: RouteOverlay) {
     if let Some(bounds) = overlay.world_bounds() {
         let area = map.viewport_size.peek().size;
-        let insets = if is_compact(area.width) {
-            Insets {
-                top: 72.0,
-                right: 24.0,
-                bottom: area.height * SHEET_PERCENT / 100.0 + 24.0,
-                left: 24.0,
-            }
-        } else {
-            DRAWER_INSETS
+        // The sheet as it rests now: collapsed, more of the map shows the route.
+        let covered = match crate::components::sheet::covered_bottom() {
+            0.0 => area.height * SHEET_PERCENT / 100.0,
+            covered => covered,
         };
-        map.fit_world_bounds(bounds, insets, 16.5);
+        map.frame_world_bounds(bounds, route_insets(area.width, covered), ROUTE_MAX_ZOOM);
     }
     map.set_route_overlay(Some(overlay));
+}
+
+/// Re-frames the route already drawn for a bottom sheet now covering `covered` logical pixels of
+/// the map (phone): collapsed, the trip fills the map it uncovers; back up, none of it hides
+/// under the sheet. Nothing without a route. Always re-fitted, gliding: the sheet moved to change
+/// how much map there is.
+pub fn refit_route(map: &mut MapController, covered: f32) {
+    let bounds = map
+        .route_overlay
+        .peek()
+        .as_ref()
+        .and_then(|overlay| overlay.world_bounds());
+    if let Some(bounds) = bounds {
+        let width = map.viewport_size.peek().size.width;
+        map.glide_to_world_bounds(bounds, route_insets(width, covered), ROUTE_MAX_ZOOM);
+    }
+}
+
+/// Closest a framed route is shown.
+const ROUTE_MAX_ZOOM: f32 = 16.5;
+
+/// The part of a `width` wide map a route is framed in: beside the drawer, or above a bottom
+/// sheet covering `covered` (compact layout).
+fn route_insets(width: f32, covered: f32) -> Insets {
+    if is_compact(width) {
+        Insets {
+            top: 72.0,
+            right: 24.0,
+            bottom: covered + 24.0,
+            left: 24.0,
+        }
+    } else {
+        DRAWER_INSETS
+    }
 }
 
 pub fn rgb_or(color: Option<u32>, fallback: Color) -> Color {

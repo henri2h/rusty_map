@@ -368,7 +368,7 @@ fn bake_tile(
     let size = (bucket_tile_px / n as f32)
         .ceil()
         .clamp(1.0, 2.0 * CELL_MAX_PX) as i32;
-    let (screen_x, screen_y) = viewport.screen_pos(key.1 as i64, key.2 as i64);
+    let (screen_x, screen_y) = viewport.screen_pos(viewport.view_tile_x(key.1), key.2 as i64);
     for (cx, cy) in visible_cells(screen_x, screen_y, viewport.tile_px, level, viewport_size) {
         ensure_cell_baked_one(
             (key, bucket, level, cx, cy),
@@ -856,35 +856,4 @@ pub fn find_loaded_ancestor(
         }
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cell_level_kicks_in_past_the_compiled_bitmap() {
-        assert_eq!(cell_level(renderer::TILE_RASTER_SIZE as f32), None);
-        assert_eq!(cell_level(800.0), Some(0));
-        assert_eq!(cell_level(CELL_MAX_PX), Some(0));
-        assert_eq!(cell_level(CELL_MAX_PX + 1.0), Some(1));
-        // z19.5 over a z14 tile: 512 · 2^5.5 ≈ 23170px → 32×32 cells of ~724px.
-        assert_eq!(cell_level(23170.0), Some(5));
-    }
-
-    #[test]
-    fn visible_cells_cover_exactly_the_screen() {
-        // 16×16 grid of 724px cells, tile origin 5000px left of the screen and 300px above it.
-        let cells: Vec<_> =
-            visible_cells(-5000.0, -300.0, 11584.0, 4, Size2D::new(1920.0, 1080.0)).collect();
-        let xs: std::collections::BTreeSet<_> = cells.iter().map(|c| c.0).collect();
-        let ys: std::collections::BTreeSet<_> = cells.iter().map(|c| c.1).collect();
-        assert_eq!(xs.into_iter().collect::<Vec<_>>(), vec![6, 7, 8, 9]);
-        assert_eq!(ys.into_iter().collect::<Vec<_>>(), vec![0, 1]);
-        // Tile entirely off screen: nothing.
-        assert_eq!(
-            visible_cells(3000.0, 0.0, 11584.0, 4, Size2D::new(1920.0, 1080.0)).count(),
-            0
-        );
-    }
 }

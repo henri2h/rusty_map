@@ -12,7 +12,7 @@ use super::util::{
     labels::PlacedLabel,
     poi_lookup,
     renderer::TransitLine,
-    viewport::{Viewport, world_to_lonlat},
+    viewport::{Viewport, world_to_lonlat, wrap_center},
 };
 
 /// All the hook state `render()` creates that the input handlers below need to close over.
@@ -144,10 +144,16 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
             drop(last);
 
             if let Some(handler) = &on_hover {
-                let viewport = Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
+                let viewport =
+                    Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
                 let (world_x, world_y) = viewport.screen_to_world(pos.x as f32, pos.y as f32);
                 let (lon, lat) = world_to_lonlat(world_x, world_y);
-                handler.call(Some(MapHover { lon, lat, x: pos.x as f32, y: pos.y as f32 }));
+                handler.call(Some(MapHover {
+                    lon,
+                    lat,
+                    x: pos.x as f32,
+                    y: pos.y as f32,
+                }));
             }
 
             let is_over_icon = placed_labels.borrow().iter().rev().any(|p| {
@@ -183,10 +189,10 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
             let delta = pos - *initial_touch.read();
             let center_delta = Viewport::new(initial, zoom_val, style.borrow().max_real_zoom)
                 .pixels_to_center_delta(delta.x, delta.y);
-            center.set(CursorPoint::new(
+            center.set(wrap_center(CursorPoint::new(
                 initial.x - center_delta.x,
                 initial.y - center_delta.y,
-            ));
+            )));
 
             ensure_view(
                 *center.peek(),
@@ -269,10 +275,10 @@ pub fn build_on_global_pointer_up(
             // where it was let go.
             let center_delta = Viewport::new(initial, *zoom.peek(), style.borrow().max_real_zoom)
                 .pixels_to_center_delta(pos.x - start.x, pos.y - start.y);
-            center.set(CursorPoint::new(
+            center.set(wrap_center(CursorPoint::new(
                 initial.x - center_delta.x,
                 initial.y - center_delta.y,
-            ));
+            )));
             platform.send(UserEvent::RequestRedraw);
             return;
         }
@@ -297,11 +303,13 @@ pub fn build_on_global_pointer_up(
             let (Some(handler), Some(set)) = (handler, set.peek().clone()) else {
                 continue;
             };
-            let viewport =
-                Viewport::new(*center.peek(), *zoom.peek(), style.borrow().max_real_zoom);
-            if let Some(id) =
-                crate::overlay::marker_at(&set, &viewport, *zoom.peek(), pos.x as f32, pos.y as f32)
-            {
+            let zoom = *zoom.peek();
+            let viewport = Viewport::new(*center.peek(), zoom, style.borrow().max_real_zoom);
+            // Hit-tested first, not in the `if let`: its temporaries (a `zoom.peek()` guard)
+            // would live through the handler, and a search pin's handler flies the map there,
+            // writing `zoom` — "already borrowed" panic.
+            let hit = crate::overlay::marker_at(&set, &viewport, zoom, pos.x as f32, pos.y as f32);
+            if let Some(id) = hit {
                 handler.call(id);
                 return;
             }
@@ -573,6 +581,7 @@ pub fn build_on_touch(
         };
         drop(gesture);
 
+        let new_center = wrap_center(new_center);
         center.set(new_center);
         if *zoom.peek() != new_zoom {
             zoom.set(new_zoom);
@@ -591,6 +600,13 @@ pub fn build_on_touch(
     }
 }
 
+/// Zoom levels per touchpad scroll pixel.
+const TOUCHPAD_ZOOM_PER_PX: f32 = 0.02;
+/// Zoom levels per mouse wheel notch.
+const WHEEL_NOTCH_ZOOM: f32 = 0.5;
+/// What freya reports for one wheel notch (`WHEEL_SPEED_MODIFIER` in freya-winit).
+const WHEEL_LINE_PX: f32 = 53.0;
+
 pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 'static {
     let tile_cache = s.tile_cache.clone();
     let zoom_dep_cache = s.zoom_dep_cache.clone();
@@ -603,7 +619,14 @@ pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 
     move |e: Event<WheelEventData>| {
         let max_real_zoom = style.borrow().max_real_zoom;
         let old_zoom = *zoom.peek();
-        let new_zoom = (old_zoom + e.delta_y as f32 * 0.02).clamp(
+        // A mouse wheel's notch arrives as one large delta (freya scales lines to 53px): at the
+        // touchpad's rate that was a jump of over a zoom level per notch, skipping past every
+        // cached level so the map blanked while zooming out. Half a level per notch instead.
+        let per_unit = match e.source {
+            WheelSource::Line => WHEEL_NOTCH_ZOOM / WHEEL_LINE_PX,
+            _ => TOUCHPAD_ZOOM_PER_PX,
+        };
+        let new_zoom = (old_zoom + e.delta_y as f32 * per_unit).clamp(
             style.borrow().min_zoom,
             super::util::viewport::max_zoom_ui(max_real_zoom),
         );
@@ -618,6 +641,7 @@ pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 
             e.element_location,
             max_real_zoom,
         );
+        let new_center = wrap_center(new_center);
         center.set(new_center);
         zoom.set(new_zoom);
 

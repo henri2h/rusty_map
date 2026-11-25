@@ -21,21 +21,20 @@ use crate::components::{
     place::humanize,
     search::favorite_chip,
     search::util::search::{self, SearchResult},
+    sheet::{Detent, SheetState},
 };
 
 use super::{
-    api::{self, Mode},
-    controller::{Endpoint, Field, TransitController, TravelMode},
-    journey::{self, Itinerary, Leg},
+    api,
+    controller::{END_COLOR, Endpoint, Field, START_COLOR, TransitController, TravelMode},
+    journey::{self, Itinerary},
+    trip::{self, TripDetail},
     ui::{
-        ACCENT, DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, divider,
-        duration_text, icon, line_badge, rgb_or, show_on_map, status_line,
+        ACCENT, DIVIDER, LINK, TEXT, TEXT_FAINT, TEXT_MUTED, icon, rgb_or, show_on_map, status_line,
     },
     when::{When, WhenPicker},
 };
 
-const START_COLOR: Color = Color::from_rgb(24, 128, 56);
-const END_COLOR: Color = Color::from_rgb(217, 48, 37);
 const WALK_COLOR: Color = Color::from_rgb(95, 99, 104);
 
 /// Same debounce/minimum as the main search box.
@@ -82,6 +81,7 @@ impl Component for Planner {
         let when = *when_state.read();
         let mode_state = transit.mode;
         let mode = *mode_state.read();
+        let trip_open = *transit.trip_open.read();
 
         let hint = match (active, &from, &to) {
             (Field::From, None, _) | (Field::To, _, None) if !picking => {
@@ -90,10 +90,10 @@ impl Component for Planner {
             _ => None,
         };
 
-        rect()
+        // The form: hidden while one itinerary's steps take the whole sheet (`trip_open`).
+        let form = rect()
             .vertical()
             .width(Size::fill())
-            .height(Size::fill())
             .child(
                 rect()
                     .horizontal()
@@ -171,7 +171,13 @@ impl Component for Planner {
                         icon: true,
                     })
                     .into_element()
-            }))
+            }));
+
+        rect()
+            .vertical()
+            .width(Size::fill())
+            .height(Size::fill())
+            .maybe_child((!trip_open).then(|| form.into_element()))
             .maybe_child(match (from, to, mode) {
                 (Some(from), Some(to), TravelMode::Transit) => {
                     Some(Itineraries { from, to, when }.into_element())
@@ -475,7 +481,8 @@ enum PlanLoad {
     Failed,
 }
 
-/// Itineraries between two set endpoints. Keyed by both, so changing either replans.
+/// Itineraries between two set endpoints. Keyed by their positions and `when`, so changing
+/// either replans (renaming one, as a map pick's address comes in, doesn't).
 #[derive(PartialEq)]
 struct Itineraries {
     from: Endpoint,
@@ -487,6 +494,11 @@ impl Component for Itineraries {
     fn render(&self) -> impl IntoElement {
         // The sheet's scroll position, for its pull-to-close (see `SheetScroll`).
         let scroll = use_consume::<SheetScroll>();
+        // Below full height on a phone, dragging the list moves the sheet instead.
+        let screen = use_screen();
+        let compact = screen.compact;
+        let sheet = use_try_consume::<SheetState>();
+        let content_scrolls = !compact || sheet.is_none_or(|sheet| sheet.content_scrolls());
         let transit = use_consume::<TransitController>();
         let state = use_state(|| PlanLoad::Loading);
         let selected = use_state(|| 0usize);
@@ -506,7 +518,8 @@ impl Component for Itineraries {
                     )
                     .await
                     {
-                        Ok(itineraries) => {
+                        Ok(mut itineraries) => {
+                            trip::sort(&mut itineraries, when);
                             if let Some(first) = itineraries.first() {
                                 show_on_map(&mut map, journey_overlay(first));
                             }
@@ -523,11 +536,24 @@ impl Component for Itineraries {
         });
 
         let now = now_unix();
+        let current = *selected.read();
+        // The chosen itinerary's steps, in place of the list.
+        if *transit.trip_open.read()
+            && let PlanLoad::Ready(itineraries) = &*state.read()
+            && let Some(itinerary) = itineraries.get(current)
+        {
+            return TripDetail {
+                itinerary: itinerary.clone(),
+                origin: self.from.name.clone(),
+                destination: self.to.name.clone(),
+                now,
+                content_scrolls,
+            }
+            .into_element();
+        }
+
         let body: Vec<Element> = match &*state.read() {
-            PlanLoad::Loading => vec![status_line(
-                CircularLoader::new().size(16.0).into_element(),
-                "Finding routes…",
-            )],
+            PlanLoad::Loading => (0..3).map(|_| trip::placeholder_card()).collect(),
             PlanLoad::Failed => vec![status_line(
                 icon(lucide::circle_alert(), TEXT_FAINT, 16.0).into_element(),
                 "Couldn't plan this journey",
@@ -537,19 +563,29 @@ impl Component for Itineraries {
                 "No public transport route found",
             )],
             PlanLoad::Ready(itineraries) => {
-                let current = *selected.read();
+                let tags = trip::tags(itineraries);
                 itineraries
                     .iter()
+                    .zip(tags)
                     .enumerate()
-                    .map(|(index, itinerary)| {
-                        itinerary_card(
-                            itinerary,
-                            index == current,
-                            now,
-                            index,
-                            selected,
-                            transit.clone(),
-                        )
+                    .map(|(index, (itinerary, tag))| {
+                        let for_map = itinerary.clone();
+                        let mut selected = selected;
+                        let mut transit = transit.clone();
+                        let sheet = sheet.filter(|_| compact);
+                        trip::itinerary_card(itinerary, tag, index == current, now, move || {
+                            selected.set(index);
+                            transit.trip_open.set(true);
+                            // Opened from the full-height list (phone): down to half height,
+                            // so the trip shows on the map above its steps.
+                            if let Some(mut sheet) = sheet
+                                && sheet.peek_detent() == Detent::Full
+                            {
+                                let window_height = transit.map.viewport_size.peek().size.height;
+                                sheet.set_detent(Detent::Half, screen, window_height);
+                            }
+                            show_on_map(&mut transit.map, journey_overlay(&for_map));
+                        })
                     })
                     .collect()
             }
@@ -557,6 +593,7 @@ impl Component for Itineraries {
 
         scroll
             .track(ScrollView::new())
+            .drag_scrolling(content_scrolls)
             .height(Size::fill())
             .direction(Direction::vertical())
             .margin((12.0f32, 0.0f32, 0.0f32, 0.0f32))
@@ -574,13 +611,16 @@ impl Component for Itineraries {
                             .color(LINK),
                     ),
             )
+            .into_element()
     }
 
     fn render_key(&self) -> DiffKey {
+        let position =
+            |endpoint: &Endpoint| ((endpoint.lat * 1e6) as i64, (endpoint.lon * 1e6) as i64);
         hash_key((
             "itineraries",
-            endpoint_key(&Some(self.from.clone())),
-            endpoint_key(&Some(self.to.clone())),
+            position(&self.from),
+            position(&self.to),
             self.when,
         ))
     }
@@ -629,259 +669,4 @@ fn journey_overlay(itinerary: &Itinerary) -> RouteOverlay {
         ));
     }
     overlay
-}
-
-fn itinerary_card(
-    itinerary: &Itinerary,
-    selected: bool,
-    now: i64,
-    index: usize,
-    mut selection: State<usize>,
-    transit: TransitController,
-) -> Element {
-    let first_vehicle = itinerary.legs.iter().find(|leg| !leg.is_walk());
-    let leaves_in = (itinerary.start - now).div_euclid(60);
-    let leave_text = if leaves_in <= 0 {
-        "Leave now".to_string()
-    } else {
-        format!("Leave in {}", duration_text(leaves_in * 60))
-    };
-    let mut facts = vec![leave_text];
-    if itinerary.transfers > 0 {
-        facts.push(format!(
-            "{} transfer{}",
-            itinerary.transfers,
-            if itinerary.transfers == 1 { "" } else { "s" }
-        ));
-    }
-    let walk = itinerary.walk_s();
-    if walk >= 60 {
-        facts.push(format!("walk {}", duration_text(walk)));
-    }
-    if let Some(leg) = first_vehicle
-        && !leg.from.name.is_empty()
-    {
-        facts.push(format!("from {}", leg.from.name));
-    }
-
-    let chips: Vec<Element> = itinerary
-        .legs
-        .iter()
-        .filter(|leg| !leg.is_walk() || leg.end - leg.start >= 60)
-        .enumerate()
-        .flat_map(|(position, leg)| {
-            let separator = (position > 0)
-                .then(|| icon(lucide::chevron_right(), TEXT_FAINT, 12.0).into_element());
-            let chip = if leg.is_walk() {
-                rect()
-                    .horizontal()
-                    .cross_align(Alignment::Center)
-                    .spacing(2.0)
-                    .child(icon(lucide::footprints(), TEXT_MUTED, 14.0))
-                    .child(
-                        label()
-                            .text(format!("{}", (leg.end - leg.start + 30) / 60))
-                            .font_size(text_size(11.0))
-                            .color(TEXT_MUTED),
-                    )
-                    .into_element()
-            } else {
-                line_badge(leg.mode, &leg.line, leg.color, leg.text_color)
-            };
-            separator.into_iter().chain(std::iter::once(chip))
-        })
-        .collect();
-
-    let itinerary_for_map = itinerary.clone();
-    let mut map = transit.map.clone();
-
-    rect()
-        .vertical()
-        .width(Size::fill())
-        .padding(12.0f32)
-        .margin((0.0f32, 0.0f32, 8.0f32, 0.0f32))
-        .corner_radius(10.0f32)
-        .background(if selected {
-            Color::from_rgb(246, 249, 255)
-        } else {
-            Color::WHITE
-        })
-        .border(
-            Border::new()
-                .fill(if selected { ACCENT } else { DIVIDER })
-                .width(if selected { 1.5 } else { 1.0 })
-                .alignment(BorderAlignment::Inner),
-        )
-        .cursor(CursorIcon::Pointer)
-        .on_press(move |_: Event<PressEventData>| {
-            selection.set(index);
-            show_on_map(&mut map, journey_overlay(&itinerary_for_map));
-        })
-        .child(
-            rect()
-                .horizontal()
-                .content(Content::flex())
-                .width(Size::fill())
-                .cross_align(Alignment::Center)
-                .child(
-                    label()
-                        .text(format!(
-                            "{} → {}",
-                            clock_time(itinerary.start),
-                            clock_time(itinerary.end)
-                        ))
-                        .width(Size::flex(1.0))
-                        .font_size(text_size(15.0))
-                        .font_weight(FontWeight::BOLD)
-                        .color(TEXT),
-                )
-                .child(
-                    label()
-                        .text(duration_text(itinerary.duration_s()))
-                        .font_size(text_size(15.0))
-                        .font_weight(FontWeight::BOLD)
-                        .color(TEXT),
-                ),
-        )
-        .child(
-            rect()
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(4.0)
-                .margin((8.0f32, 0.0f32, 6.0f32, 0.0f32))
-                .overflow(Overflow::Clip)
-                .children(chips),
-        )
-        .child(
-            label()
-                .text(facts.join(" · "))
-                .font_size(text_size(11.0))
-                .color(TEXT_MUTED)
-                .width(Size::fill()),
-        )
-        .maybe(selected, |r| {
-            r.child(
-                rect()
-                    .vertical()
-                    .width(Size::fill())
-                    .margin((10.0f32, 0.0f32, 0.0f32, 0.0f32))
-                    .child(divider())
-                    .children(itinerary.legs.iter().map(leg_detail)),
-            )
-        })
-        .into_element()
-}
-
-/// One leg of the selected itinerary.
-fn leg_detail(leg: &Leg) -> Element {
-    if leg.is_walk() {
-        let distance = leg
-            .distance_m
-            .filter(|meters| *meters >= 1.0)
-            .map(|meters| format!(" ({} m)", meters.round() as i64))
-            .unwrap_or_default();
-        return rect()
-            .horizontal()
-            .content(Content::flex())
-            .width(Size::fill())
-            .cross_align(Alignment::Center)
-            .spacing(10.0)
-            .padding((8.0f32, 0.0f32))
-            .child(
-                rect()
-                    .width(Size::px(56.0))
-                    .main_align(Alignment::Center)
-                    .cross_align(Alignment::Center)
-                    .child(icon(lucide::footprints(), TEXT_MUTED, 16.0)),
-            )
-            .child(
-                label()
-                    .text(format!(
-                        "Walk {}{distance} to {}",
-                        duration_text(leg.end - leg.start),
-                        leg.to.name
-                    ))
-                    .width(Size::flex(1.0))
-                    .font_size(text_size(12.0))
-                    .color(TEXT_MUTED),
-            )
-            .into_element();
-    }
-
-    let stops = leg.intermediate.len() + 1;
-    let live = match (leg.realtime, leg.delay_min) {
-        (true, Some(delay)) if delay > 0 => Some((format!("{delay} min late"), LATE)),
-        (true, _) => Some(("on time".to_string(), LIVE)),
-        _ => None,
-    };
-    let mode_word = match leg.mode {
-        Mode::Bus => "bus",
-        Mode::Tram => "tram",
-        Mode::Subway => "metro",
-        Mode::Rail => "train",
-        Mode::Ferry => "boat",
-        Mode::Walk | Mode::Other => "vehicle",
-    };
-
-    rect()
-        .horizontal()
-        .content(Content::flex())
-        .width(Size::fill())
-        .spacing(10.0)
-        .padding((8.0f32, 0.0f32))
-        .child(line_badge(leg.mode, &leg.line, leg.color, leg.text_color))
-        .child(
-            rect()
-                .vertical()
-                .width(Size::flex(1.0))
-                .spacing(2.0)
-                .child(
-                    label()
-                        .text(format!("→ {}", leg.headsign))
-                        .font_size(text_size(13.0))
-                        .font_weight(FontWeight::BOLD)
-                        .color(TEXT)
-                        .width(Size::fill()),
-                )
-                .child(
-                    label()
-                        .text(format!(
-                            "{}  Board at {}",
-                            clock_time(leg.start),
-                            leg.from.name
-                        ))
-                        .font_size(text_size(12.0))
-                        .color(TEXT)
-                        .width(Size::fill()),
-                )
-                .child(
-                    label()
-                        .text(format!(
-                            "{stops} stop{} · {} by {mode_word}",
-                            if stops == 1 { "" } else { "s" },
-                            duration_text(leg.end - leg.start)
-                        ))
-                        .font_size(text_size(11.0))
-                        .color(TEXT_FAINT),
-                )
-                .child(
-                    label()
-                        .text(format!(
-                            "{}  Get off at {}",
-                            clock_time(leg.end),
-                            leg.to.name
-                        ))
-                        .font_size(text_size(12.0))
-                        .color(TEXT)
-                        .width(Size::fill()),
-                )
-                .maybe_child(live.map(|(text, color)| {
-                    label()
-                        .text(text)
-                        .font_size(text_size(11.0))
-                        .color(color)
-                        .into_element()
-                })),
-        )
-        .into_element()
 }

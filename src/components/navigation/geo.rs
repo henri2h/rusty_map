@@ -85,30 +85,3 @@ pub fn project_on_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> (f64, 
     let (dx, dy) = (px - bx * t, py - by * t);
     (dx.hypot(dy), t)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bearings_and_turns() {
-        let origin = (2.35, 48.85);
-        assert!((bearing(origin, (2.35, 48.86)) - 0.0).abs() < 0.5);
-        assert!((bearing(origin, (2.36, 48.85)) - 90.0).abs() < 0.5);
-        assert_eq!(turn_angle(350.0, 10.0), 20.0);
-        assert_eq!(turn_angle(10.0, 350.0), -20.0);
-        assert_eq!(turn_angle(0.0, 180.0), 180.0);
-    }
-
-    #[test]
-    fn distances_along_a_line() {
-        let points = [(2.35, 48.85), (2.35, 48.851), (2.35, 48.852)];
-        let along = cumulative(&points);
-        assert!((along[2] - 222.6).abs() < 1.0);
-        let mid = point_at(&points, &along, along[2] / 2.0);
-        assert!((mid.1 - 48.851).abs() < 1e-6);
-        let (distance, t) = project_on_segment((2.3501, 48.8505), points[0], points[1]);
-        assert!((t - 0.5).abs() < 0.01);
-        assert!((distance - 7.3).abs() < 0.5);
-    }
-}

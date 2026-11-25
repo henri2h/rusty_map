@@ -176,7 +176,7 @@ impl Component for HomePage {
                             if *transit.planner_open.peek() {
                                 if *transit.picking.peek() {
                                     haptic(Haptic::Select);
-                                    transit.set_endpoint(map_point(tap.lat, tap.lon));
+                                    transit.set_map_point(tap.lat, tap.lon);
                                 }
                                 return;
                             }
@@ -206,7 +206,7 @@ impl Component for HomePage {
                             if *transit.planner_open.peek() {
                                 if *transit.picking.peek() {
                                     haptic(Haptic::Select);
-                                    transit.set_endpoint(map_point(line.lat, line.lon));
+                                    transit.set_map_point(line.lat, line.lon);
                                 }
                                 return;
                             }
@@ -274,15 +274,6 @@ impl Component for HomePage {
                 open: layers_open,
                 top: 12.,
             })
-    }
-}
-
-/// A journey endpoint set by tapping the map.
-fn map_point(lat: f64, lon: f64) -> Endpoint {
-    Endpoint {
-        name: format!("Point on map ({lat:.4}, {lon:.4})"),
-        lat,
-        lon,
     }
 }
 

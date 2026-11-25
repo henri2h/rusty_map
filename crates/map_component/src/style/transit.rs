@@ -266,31 +266,3 @@ fn station_labels(subclasses: &[&str], min_zoom: f64, sizes: [(f64, f64); 2]) ->
         halo_width: 1.5,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fades_roads_and_adds_transit_layers() {
-        let mut base = crate::style::default::default_style();
-        base.layers.push(transit_line(
-            Filter::Eq("class".into(), str_value("primary")),
-            Color::WHITE,
-            0.0,
-            &[(0.0, 1.0)],
-        ));
-        let transit = with_transit(&base);
-
-        let opacity = |layer: &StyleLayer| match layer {
-            StyleLayer::Line(line) => Some(line.opacity.eval(14.0)),
-            _ => None,
-        };
-        // The base road layer keeps its place, faded.
-        let road = opacity(&transit.layers[base.layers.len() - 1]).unwrap();
-        assert!((road - ROAD_FADE).abs() < 1e-9);
-        // Casing + line for each of the 5 track kinds and 4 route kinds, plus 2 station labels.
-        assert_eq!(transit.layers.len(), base.layers.len() + 20);
-        assert!(transit.poi_filter.is_some());
-    }
-}

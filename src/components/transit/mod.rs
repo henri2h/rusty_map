@@ -4,6 +4,7 @@ mod departures;
 mod journey;
 mod osm_lines;
 mod planner;
+mod trip;
 mod ui;
 mod views;
 mod when;
@@ -14,7 +15,8 @@ pub use controller::{Endpoint, Field, TransitController, TransitView, TravelMode
 pub use departures::{Departures, NextTimes};
 pub use planner::Planner;
 pub use ui::{
-    central_european_offset, clock_time, duration_text, line_badge, show_on_map, status_line,
+    central_european_offset, clock_time, duration_text, line_badge, refit_route, show_on_map,
+    status_line,
 };
 pub use views::{LineView, TrackView, TripView};
 

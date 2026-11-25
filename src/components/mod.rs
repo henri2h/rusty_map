@@ -7,5 +7,6 @@ pub mod panoramax;
 pub mod place;
 pub mod poi_icon;
 pub mod search;
+pub mod sheet;
 pub mod transit;
 mod wikipedia;

@@ -32,7 +32,7 @@ class MainActivity : NativeActivity() {
 
         /** System bar heights in dp; the app pads its overlays (see `src/mobile.rs`). */
         @JvmStatic
-        external fun nativeSetInsets(top: Float, bottom: Float)
+        external fun nativeSetInsets(top: Float, bottom: Float, keyboard: Float)
 
         /** A new fix; `accuracy` < 0 and a NaN `bearing` mean unknown (see `src/location.rs`). */
         @JvmStatic
@@ -83,7 +83,10 @@ class MainActivity : NativeActivity() {
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
-            nativeSetInsets(bars.top / density, bars.bottom / density)
+            // Edge to edge, the keyboard covers the window instead of shrinking it: its height
+            // too, so the search sheet keeps its results above it.
+            val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            nativeSetInsets(bars.top / density, bars.bottom / density, keyboard / density)
             ViewCompat.onApplyWindowInsets(view, insets)
         }
 

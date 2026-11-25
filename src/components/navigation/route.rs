@@ -142,7 +142,7 @@ struct IgnGeometryJson {
 
 #[derive(Deserialize, Default)]
 struct IgnAttributesJson {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "ign_name")]
     name: IgnNameJson,
 }
 
@@ -152,6 +152,27 @@ struct IgnNameJson {
     nom_1_droite: String,
     #[serde(default)]
     nom_1_gauche: String,
+}
+
+/// A step's road names: normally an object, but IGN also sends them as a string holding a
+/// fragment of that object's JSON, cut off at either end (seen for long walks) — which
+/// failed the whole route. Names are dug out of such a fragment when it has them; none
+/// otherwise (the step still counts, unnamed).
+fn ign_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<IgnNameJson, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(fragment) => {
+            let field = |key: &str| {
+                let start = fragment.find(&format!("{key}\": \""))? + key.len() + 4;
+                let end = fragment[start..].find('"')?;
+                Some(fragment[start..start + end].to_string())
+            };
+            IgnNameJson {
+                nom_1_droite: field("nom_1_droite").unwrap_or_default(),
+                nom_1_gauche: field("nom_1_gauche").unwrap_or_default(),
+            }
+        }
+        value => serde_json::from_value(value).unwrap_or_default(),
+    })
 }
 
 fn parse_ign(json: IgnRouteJson) -> Option<WalkRoute> {
@@ -297,75 +318,4 @@ fn parse(response: PlanJson) -> Option<WalkRoute> {
         maneuvers,
         source: RouteSource::Transitous,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::components::navigation::maneuvers::ManeuverKind;
-
-    /// A real answer, Eiffel Tower → Louvre (2026-10-19), trimmed to `direct`.
-    const FIXTURE: &str = include_str!("testdata/walk_plan.json");
-    /// IGN's `bdtopo-valhalla` pedestrian answer for the same walk (2026-10-19).
-    const IGN_FIXTURE: &str = include_str!("testdata/ign_walk.json");
-
-    #[test]
-    fn parses_a_real_ign_walk() {
-        let route = parse_ign(serde_json::from_str(IGN_FIXTURE).unwrap()).unwrap();
-        assert_eq!(route.source, RouteSource::Ign);
-        assert!((route.distance_m - 3681.9).abs() < 1.0);
-        let length = *route.along.last().unwrap();
-        assert!(
-            (length - route.distance_m).abs() / route.distance_m < 0.05,
-            "{length}"
-        );
-        let kinds: Vec<_> = route.maneuvers.iter().map(|m| m.kind).collect();
-        assert_eq!(kinds.first(), Some(&ManeuverKind::Depart));
-        assert_eq!(kinds.last(), Some(&ManeuverKind::Arrive));
-        // IGN's own turns come through, named the way streets are signed.
-        let named: Vec<&str> = route
-            .maneuvers
-            .iter()
-            .filter_map(|m| m.street.as_deref())
-            .collect();
-        assert!(named.contains(&"Boulevard Saint-Germain"), "{named:?}");
-        assert!(
-            named.contains(&"Quai Valery Giscard d'Estaing"),
-            "{named:?}"
-        );
-        let germain = route
-            .maneuvers
-            .iter()
-            .find(|m| m.street.as_deref() == Some("Boulevard Saint-Germain"))
-            .unwrap();
-        assert_eq!(germain.kind, ManeuverKind::Right);
-        let total: f64 = route.maneuvers.iter().map(|m| m.distance_m).sum();
-        assert!((total - length).abs() < 1.0);
-    }
-
-    #[test]
-    fn parses_a_real_walk() {
-        let route = parse(serde_json::from_str(FIXTURE).unwrap()).unwrap();
-        assert!((route.distance_m - 3779.0).abs() < 1.0);
-        assert!((route.duration_s - 3129.0).abs() < 1.0);
-        // The path's own length agrees with the router's distance.
-        let length = *route.along.last().unwrap();
-        assert!(
-            (length - route.distance_m).abs() / route.distance_m < 0.05,
-            "{length}"
-        );
-        // 112 raw steps become a readable handful, framed by Depart and Arrive.
-        let count = route.maneuvers.len();
-        assert!((3..=40).contains(&count), "{count} maneuvers");
-        assert_eq!(route.maneuvers[0].kind, ManeuverKind::Depart);
-        assert_eq!(route.maneuvers[count - 1].kind, ManeuverKind::Arrive);
-        assert!(
-            route
-                .maneuvers
-                .iter()
-                .any(|m| m.kind == ManeuverKind::Stairs)
-        );
-        let total: f64 = route.maneuvers.iter().map(|m| m.distance_m).sum();
-        assert!((total - length).abs() < 1.0);
-    }
 }

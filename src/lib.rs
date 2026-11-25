@@ -100,6 +100,18 @@ mod android {
                 .with_filter(android_logger::FilterBuilder::new().parse(&filter).build()),
         );
         log::info!("log filter: {filter}");
+
+        // android-activity's own hook logs only the message (tag `RustPanic`): the backtrace
+        // too, line by line (logcat cuts long entries), before handing over to it.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            log::error!("panic: {info}");
+            for line in backtrace.to_string().lines() {
+                log::error!("  {line}");
+            }
+            previous(info);
+        }));
     }
 
     unsafe extern "C" {

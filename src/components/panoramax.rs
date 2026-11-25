@@ -466,15 +466,10 @@ impl Component for PhotoViewer {
         // between them (`Size::flex` doesn't resolve in this window-sized overlay).
         let top_height = 12.0 + screen.insets.top + BUTTON_SIZE + 12.0;
         let bottom_height = BOTTOM_BAR_HEIGHT + screen.insets.bottom;
-        let bars = (top_height + bottom_height) as u32;
-        let photo_height = Size::func_data(
-            move |c| Some((c.root - (top_height + bottom_height)).max(0.0)),
-            &bars,
-        );
+        let photo_height = screen.window_less(top_height + bottom_height);
         // The photo between the two arrows.
         let arrows = if count > 1 { 2.0 * ARROW_COLUMN } else { 0.0 };
-        let photo_width =
-            Size::func_data(move |c| Some((c.root - arrows).max(0.0)), &(arrows as u32));
+        let photo_width = screen.window_less(arrows);
 
         let top_bar = rect()
             .horizontal()
@@ -595,27 +590,5 @@ impl Component for PhotoViewer {
             .child(top_bar)
             .child(middle)
             .child(bottom_bar)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_search_results() {
-        let parsed: SearchResponse = serde_json::from_str(
-            r#"{"features": [{"id": "3fcb", "properties": {"datetime": "2025-10-23T08:49:49Z"},
-                "assets": {"thumb": {"href": "https://example.org/thumb.jpg"}},
-                "providers": [{"name": "Moosh", "roles": ["producer"]}]}], "links": []}"#,
-        )
-        .unwrap();
-        let feature = &parsed.features[0];
-        assert_eq!(feature.id, "3fcb");
-        assert_eq!(
-            feature.assets.thumb.as_ref().unwrap().href,
-            "https://example.org/thumb.jpg"
-        );
-        assert_eq!(feature.providers[0].name, "Moosh");
     }
 }

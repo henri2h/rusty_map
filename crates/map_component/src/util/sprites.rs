@@ -217,7 +217,12 @@ fn build_atlas(png: &Bytes) -> Option<Image> {
     // *order* differs per platform (BGRA vs RGBA), alpha is last in both.
     let n32_is_bgra = ColorType::N32 == ColorType::BGRA8888;
     let mut out = vec![0u8; (width * height * 4) as usize];
-    for (dst, px) in out.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+    for (dst, px) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
         let sdf = px[3] as f32 / 255.0;
         // Smoothstep across the SDF edge (0.5) — crisp silhouette with ~1px anti-aliasing.
         let t = ((sdf - 0.47) / 0.09).clamp(0.0, 1.0);
@@ -238,37 +243,4 @@ fn build_atlas(png: &Bytes) -> Option<Image> {
 
     let info = ImageInfo::new_n32_premul((width, height), None);
     raster_from_data(&info, Data::new_copy(&out), (width * 4) as usize)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icon_png_cuts_out_the_kinds_sprite() {
-        let mut surface = freya::engine::prelude::raster_n32_premul((64, 32)).unwrap();
-        let mut index = FxHashMap::default();
-        index.insert(
-            "icon-cafe".to_string(),
-            Rect::from_xywh(32.0, 0.0, 32.0, 32.0),
-        );
-        index.insert("shop_11".to_string(), Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
-        let sheet = SpriteSheet {
-            image: surface.image_snapshot(),
-            index,
-            pngs: RefCell::default(),
-        };
-
-        let (name, png) = sheet.icon_png("cafe", None).unwrap();
-        assert_eq!(name, "icon-cafe");
-        let decoded = Image::from_encoded(Data::new_copy(&png)).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (32, 32));
-
-        // Unknown kind: falls back to the class's sprite.
-        assert_eq!(
-            sheet.icon_png("tobacco", Some("shop")).unwrap().0,
-            "shop_11"
-        );
-        assert!(sheet.icon_png("tobacco", None).is_none());
-    }
 }

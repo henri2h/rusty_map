@@ -1,4 +1,9 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use freya::prelude::*;
 use torin::geometry::{Area, CursorPoint};
@@ -9,9 +14,24 @@ use crate::{
     util::{
         renderer::TILE_SIZE,
         sprites::SpriteSheet,
+        tiles::background_delay,
         viewport::{Viewport, lonlat_to_center, max_zoom_ui, world_to_lonlat},
     },
 };
+
+/// How long a camera glide (see [`MapController::glide_to`]) lasts.
+const GLIDE: Duration = Duration::from_millis(380);
+/// Step between a glide's frames.
+const GLIDE_FRAME: Duration = Duration::from_millis(16);
+/// How far past the free area (screen pixels) a box may reach and still count as shown, see
+/// [`MapController::frame_world_bounds`].
+const FRAMED_TOLERANCE_PX: f32 = 32.0;
+/// How many zoom levels further out than a fit the view may be and still count as framing a box
+/// (one level: the box at least half the size the fit would draw it).
+const FRAMED_ZOOM_SLACK: f32 = 1.0;
+
+/// A world-coordinate box (see `viewport::lonlat_to_world`), `((min_x, min_y), (max_x, max_y))`.
+pub type WorldBounds = ((f64, f64), (f64, f64));
 
 /// Screen-pixel margins kept clear when fitting the view, e.g. for a panel covering the map's
 /// left side.
@@ -62,6 +82,8 @@ pub struct MapController {
 
     pub style: Rc<RefCell<Arc<StyleSpec>>>,
     pub platform: PlatformWindow,
+    /// The camera glide under way, cancelled by the next one (see [`Self::glide_to`]).
+    glide: Rc<RefCell<Option<TaskHandle>>>,
 }
 
 impl PartialEq for MapController {
@@ -79,6 +101,7 @@ impl PartialEq for MapController {
             && self.cursor == other.cursor
             && self.sprites == other.sprites
             && Rc::ptr_eq(&self.style, &other.style)
+            && Rc::ptr_eq(&self.glide, &other.glide)
     }
 }
 
@@ -102,6 +125,7 @@ impl MapController {
         let sprites = use_state::<Option<Rc<SpriteSheet>>>(|| None);
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
+        let glide = use_hook(|| Rc::new(RefCell::new(None)));
 
         Self {
             center,
@@ -118,6 +142,7 @@ impl MapController {
             sprites,
             style,
             platform,
+            glide,
         }
     }
 }
@@ -177,12 +202,58 @@ impl MapController {
 
     /// Moves and zooms the view so the world-coordinate box `bounds` fills the part of the map
     /// not covered by `insets`, zooming no closer than `max_zoom`.
-    pub fn fit_world_bounds(
-        &mut self,
-        ((min_x, min_y), (max_x, max_y)): ((f64, f64), (f64, f64)),
+    pub fn fit_world_bounds(&mut self, bounds: WorldBounds, insets: Insets, max_zoom: f32) {
+        let (center, zoom) = self.fit_target(bounds, insets, max_zoom);
+        self.center.set(center);
+        self.zoom.set(zoom);
+        self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// [`Self::fit_world_bounds`], gliding there (see [`Self::glide_to`]).
+    pub fn glide_to_world_bounds(&mut self, bounds: WorldBounds, insets: Insets, max_zoom: f32) {
+        let (center, zoom) = self.fit_target(bounds, insets, max_zoom);
+        self.glide_to(center, zoom);
+    }
+
+    /// Brings `bounds` into view like [`Self::glide_to_world_bounds`], but only when the view
+    /// doesn't already frame it: all of it within the free area (give or take
+    /// `FRAMED_TOLERANCE_PX`) at about the zoom a fit would pick. A new route over the same
+    /// place — another of a journey's itineraries — leaves the map alone instead of shifting it.
+    pub fn frame_world_bounds(&mut self, bounds: WorldBounds, insets: Insets, max_zoom: f32) {
+        let (_, fit_zoom) = self.fit_target(bounds, insets, max_zoom);
+        let framed = *self.zoom.peek() >= fit_zoom - FRAMED_ZOOM_SLACK
+            && self.shows_world_bounds(bounds, insets, FRAMED_TOLERANCE_PX);
+        if !framed {
+            self.glide_to_world_bounds(bounds, insets, max_zoom);
+        }
+    }
+
+    /// Whether all of `bounds` is on screen outside `insets`, `tolerance` pixels past it allowed.
+    pub fn shows_world_bounds(
+        &self,
+        ((min_x, min_y), (max_x, max_y)): WorldBounds,
+        insets: Insets,
+        tolerance: f32,
+    ) -> bool {
+        let max_real_zoom = self.style.borrow().max_real_zoom;
+        let viewport = Viewport::new(*self.center.peek(), *self.zoom.peek(), max_real_zoom);
+        // Together, onto one copy of the sideways-repeating world.
+        let corners = viewport.shape_to_screen(&[(min_x, min_y), (max_x, max_y)]);
+        let ((left, top), (right, bottom)) = (corners[0], corners[1]);
+        let area = self.viewport_size.peek().size;
+        left >= insets.left - tolerance
+            && top >= insets.top - tolerance
+            && right <= area.width - insets.right + tolerance
+            && bottom <= area.height - insets.bottom + tolerance
+    }
+
+    /// The view [`Self::fit_world_bounds`] moves to: `(center, zoom)`.
+    fn fit_target(
+        &self,
+        ((min_x, min_y), (max_x, max_y)): WorldBounds,
         insets: Insets,
         max_zoom: f32,
-    ) {
+    ) -> (CursorPoint, f32) {
         let style = self.style.borrow().clone();
         let area = self.viewport_size.peek().size;
         let available_w = (area.width - insets.left - insets.right).max(64.0) as f64;
@@ -203,10 +274,68 @@ impl MapController {
                 insets.left as f64 + available_w / 2.0,
                 insets.top as f64 + available_h / 2.0,
             );
-        self.center
-            .set(CursorPoint::new(raw.x - offset.x, raw.y - offset.y));
-        self.zoom.set(zoom);
-        self.platform.send(UserEvent::RequestRedraw);
+        (CursorPoint::new(raw.x - offset.x, raw.y - offset.y), zoom)
+    }
+
+    /// Moves the view to `(center, zoom)` over [`GLIDE`], easing in and out, rather than jumping
+    /// there. Zoom changes evenly (it's a scale exponent) while the point in the middle of the
+    /// screen travels straight to its new place. Replaces a glide under way; stops as soon as
+    /// something else moves the map (a drag, the wheel) — the user's hand wins.
+    pub fn glide_to(&mut self, center: CursorPoint, zoom: f32) {
+        if let Some(previous) = self.glide.borrow_mut().take() {
+            previous.cancel();
+        }
+        let (mut center_state, mut zoom_state) = (self.center, self.zoom);
+        let (from_center, from_zoom) = (*center_state.peek(), *zoom_state.peek());
+        if from_center == center && from_zoom == zoom {
+            return;
+        }
+        let max_real_zoom = self.style.borrow().max_real_zoom;
+        let size = self.viewport_size.peek().size;
+        // `center` anchors the top-left corner: the screen's middle, from it, at `zoom`.
+        let half = move |zoom: f32| {
+            Viewport::new(CursorPoint::zero(), zoom, max_real_zoom)
+                .pixels_to_center_delta(size.width as f64 / 2.0, size.height as f64 / 2.0)
+                .to_vector()
+        };
+        let (from_middle, to_middle) = (from_center + half(from_zoom), center + half(zoom));
+        let platform = self.platform.clone();
+
+        // In the window's scope: a glide started from a list row's press handler would otherwise
+        // stop when that row re-renders away.
+        let task = spawn_in_window(async move {
+            let start = Instant::now();
+            let mut shown = (from_center, from_zoom);
+            loop {
+                background_delay(GLIDE_FRAME).await;
+                if (*center_state.peek(), *zoom_state.peek()) != shown {
+                    return;
+                }
+                let t = (start.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
+                // Ease in and out (cubic).
+                let eased = if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                };
+                let frame_zoom = from_zoom + (zoom - from_zoom) * eased;
+                let middle = from_middle + (to_middle - from_middle) * eased as f64;
+                let frame_center = if t >= 1.0 {
+                    center
+                } else {
+                    middle - half(frame_zoom)
+                };
+                let frame_zoom = if t >= 1.0 { zoom } else { frame_zoom };
+                center_state.set(frame_center);
+                zoom_state.set(frame_zoom);
+                shown = (frame_center, frame_zoom);
+                platform.send(UserEvent::RequestRedraw);
+                if t >= 1.0 {
+                    return;
+                }
+            }
+        });
+        *self.glide.borrow_mut() = Some(task);
     }
 
     /// The lon/lat box the map currently shows (less `insets`, e.g. a panel covering its
@@ -220,7 +349,12 @@ impl MapController {
             (area.width - insets.right).max(insets.left + 1.0),
             (area.height - insets.bottom).max(insets.top + 1.0),
         );
-        // World y grows southwards.
-        (world_to_lonlat(left, bottom), world_to_lonlat(right, top))
+        // World y grows southwards. Longitudes from the left edge's, not each edge wrapped on
+        // its own: a view across the antimeridian would come out with its sides swapped. Clamped,
+        // as a box can't cross it.
+        let ((min_lon, min_lat), (_, max_lat)) =
+            (world_to_lonlat(left, bottom), world_to_lonlat(right, top));
+        let max_lon = (min_lon + (right - left) * 360.0).min(180.0);
+        ((min_lon, min_lat), (max_lon, max_lat))
     }
 }

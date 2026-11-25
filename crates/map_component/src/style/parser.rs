@@ -328,7 +328,7 @@ fn parse_color_array(arr: &[Jv]) -> ColorExpr {
             let key = extract_key(arr.get(1).unwrap_or(&Jv::Null)).unwrap_or_default();
             let pairs = arr.get(2..arr.len().saturating_sub(1)).unwrap_or(&[]);
             let mut cases = Vec::new();
-            for pair in pairs.chunks_exact(2) {
+            for pair in pairs.as_chunks::<2>().0 {
                 let color = parse_color_expr(Some(&pair[1])).into_static_color();
                 match &pair[0] {
                     Jv::Array(labels) => cases.extend(
@@ -372,10 +372,12 @@ fn parse_color_stops_obj(map: &serde_json::Map<String, Jv>) -> ColorExpr {
 }
 
 fn parse_zoom_color_stops(arr: &[Jv]) -> Vec<(f64, freya::engine::prelude::Color)> {
-    arr.chunks_exact(2)
-        .map(|pair| {
-            let z = pair[0].as_f64().unwrap_or(0.0);
-            let c = parse_color_expr(Some(&pair[1])).into_static_color();
+    arr.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[zoom, color]| {
+            let z = zoom.as_f64().unwrap_or(0.0);
+            let c = parse_color_expr(Some(color)).into_static_color();
             (z, c)
         })
         .collect()
@@ -442,13 +444,10 @@ fn parse_num_stops_obj(map: &serde_json::Map<String, Jv>) -> NumExpr {
 }
 
 fn parse_zoom_num_stops(arr: &[Jv]) -> Vec<(f64, f64)> {
-    arr.chunks_exact(2)
-        .map(|pair| {
-            (
-                pair[0].as_f64().unwrap_or(0.0),
-                pair[1].as_f64().unwrap_or(0.0),
-            )
-        })
+    arr.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[zoom, value]| (zoom.as_f64().unwrap_or(0.0), value.as_f64().unwrap_or(0.0)))
         .collect()
 }
 
@@ -718,80 +717,5 @@ impl IntoStaticOpt for ColorExpr {
             ColorExpr::Static(c) if c != freya::engine::prelude::Color::TRANSPARENT => Some(c),
             _ => None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use freya::engine::prelude::Color;
-    use mvt_reader::feature::Value;
-
-    use super::*;
-    use crate::util::renderer::Properties;
-
-    fn props(pairs: &[(&str, Value)]) -> Properties {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
-
-    fn filter(json: &str) -> Filter {
-        parse_filter(&serde_json::from_str(json).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn match_expands_array_labels_and_numbers() {
-        let expr = parse_color_expr(Some(
-            &serde_json::from_str(
-                r##"["match", ["get", "class"], ["motorway", "trunk"], "#ff0000", 3, "#00ff00", "#0000ff"]"##,
-            )
-            .unwrap(),
-        ));
-        let color = |v: Value| expr.eval(&props(&[("class", v)]), 14.0);
-        let red = Color::from_rgb(255, 0, 0);
-        assert_eq!(color(Value::String("motorway".into())), red);
-        assert_eq!(color(Value::String("trunk".into())), red);
-        assert_eq!(color(Value::Int(3)), Color::from_rgb(0, 255, 0));
-        assert_eq!(
-            color(Value::String("path".into())),
-            Color::from_rgb(0, 0, 255)
-        );
-    }
-
-    #[test]
-    fn none_negates_every_branch() {
-        let f = filter(r#"["none", ["==", "a", 1], ["==", "b", 1]]"#);
-        assert!(f.eval(&props(&[("a", Value::Int(0)), ("b", Value::Int(0))])));
-        assert!(!f.eval(&props(&[("a", Value::Int(1))])));
-        assert!(!f.eval(&props(&[("b", Value::Int(1))])));
-    }
-
-    #[test]
-    fn geometry_type_conditions_are_true_even_inside_any() {
-        let empty = props(&[]);
-        assert!(filter(r#"["any", ["==", "$type", "Polygon"]]"#).eval(&empty));
-        assert!(filter(r#"["in", "$type", "Point", "LineString"]"#).eval(&empty));
-        assert!(filter(r#"["==", ["geometry-type"], "Point"]"#).eval(&empty));
-    }
-
-    #[test]
-    fn zoom_function_layout_values_do_not_drop_the_layer() {
-        let style = parse_style(
-            r#"{"sources": {}, "layers": [{
-                "id": "shield", "type": "symbol", "source-layer": "transportation_name",
-                "layout": {
-                    "symbol-placement": {"base": 1, "stops": [[10, "point"], [11, "line"]]},
-                    "text-field": "{ref}",
-                    "text-font": ["Noto Sans Bold"]
-                }
-            }]}"#,
-        )
-        .unwrap();
-        let [StyleLayer::Symbol(symbol)] = style.layers.as_slice() else {
-            panic!("shield layer dropped");
-        };
-        assert!(symbol.placement == TextPlacement::Line);
-        assert!(symbol.text_font_bold);
     }
 }

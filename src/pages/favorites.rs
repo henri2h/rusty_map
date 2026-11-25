@@ -243,11 +243,11 @@ impl FavoritesPage {
                                     .text(favorite.kind.clone())
                                     .font_size(text_size(12.0))
                                     .color(TEXT_FAINT)
+                                    .max_lines(1)
+                                    .text_overflow(TextOverflow::Ellipsis)
                                     .into_element()
                             })),
                     )
-                    .child(action(lucide::map(), "Show on map", show))
-                    .child(action(lucide::route(), "Directions", directions))
                     .child(
                         Button::new()
                             .flat()
@@ -258,6 +258,17 @@ impl FavoritesPage {
                             })
                             .child(icon(lucide::trash_2(), TEXT_FAINT, 16.0)),
                     ),
+            )
+            // On their own row: beside the name they left it no width on a phone, cutting the
+            // name to nothing and wrapping the kind one letter per line.
+            .child(
+                rect()
+                    .horizontal()
+                    .cross_align(Alignment::Center)
+                    .spacing(8.0)
+                    .margin((6.0f32, 0.0f32, 0.0f32, 22.0f32))
+                    .child(action(lucide::map(), "Show on map", show))
+                    .child(action(lucide::route(), "Directions", directions)),
             )
             .maybe_child(favorite.stop.then(|| {
                 rect()

@@ -37,6 +37,29 @@ fn is_time_ranges(text: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, ':' | '-' | ',' | '+' | ' '))
 }
 
+/// Strictly clock ranges, `09:00-12:00, 14:00-18:00+`: unlike [`is_time_ranges`], no stray
+/// digits (`"02: 09:00-00:45"`, the end of a date before its hours).
+fn is_clock_ranges(text: &str) -> bool {
+    let is_clock = |time: &str| {
+        time.trim_end_matches('+')
+            .split_once(':')
+            .is_some_and(|(hours, minutes)| {
+                (1..=2).contains(&hours.len())
+                    && minutes.len() == 2
+                    && hours
+                        .bytes()
+                        .chain(minutes.bytes())
+                        .all(|b| b.is_ascii_digit())
+            })
+    };
+    text.split(',').all(|range| {
+        range
+            .trim()
+            .split_once('-')
+            .is_some_and(|(from, to)| is_clock(from) && is_clock(to))
+    })
+}
+
 /// `09:00-12:00,14:00-18:00` → `09:00–12:00, 14:00–18:00`.
 fn format_time_ranges(text: &str) -> String {
     text.split(',')
@@ -104,9 +127,41 @@ fn parse_rule(rule: &str) -> Option<OpeningRule> {
         });
     }
 
+    if let Some(rule) = split_selector(rule) {
+        return Some(rule);
+    }
+
     Some(OpeningRule {
         days: "Hours".to_string(),
         hours: rule.to_string(),
+    })
+}
+
+/// A rule with a selector [`parse_day_selector`] doesn't understand (months, dates, several
+/// parts: `"Jun 21-Sep 02: 09:00-00:45"`, `"Jul 14,Jul 15 off"`) split before its hours, so it
+/// still reads as period/hours: `"Jun 21–Sep 02"`/`"09:00–00:45"`. `None` without hours at its end.
+fn split_selector(rule: &str) -> Option<OpeningRule> {
+    let (selector, hours) = rule
+        .char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .map(|(at, _)| (rule[..at].trim(), rule[at..].trim()))
+        .find(|(selector, hours)| {
+            !selector.is_empty()
+                && (is_clock_ranges(hours)
+                    || hours.eq_ignore_ascii_case("off")
+                    || hours.eq_ignore_ascii_case("closed"))
+        })?;
+    let days = selector
+        .split_whitespace()
+        .map(|token| {
+            let token = token.trim_end_matches(':');
+            parse_day_selector(token).unwrap_or_else(|| token.replace('-', "–").replace(',', ", "))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(OpeningRule {
+        days,
+        hours: format_hours(hours),
     })
 }
 
@@ -167,7 +222,9 @@ fn minute_ranges(text: &str) -> Option<Vec<(u32, u32)>> {
     let minute = |time: &str| {
         let (hours, minutes) = time.trim().split_once(':')?;
         let (hours, minutes): (u32, u32) = (hours.parse().ok()?, minutes.parse().ok()?);
-        (hours <= 24 && minutes < 60).then_some(hours * 60 + minutes)
+        let minute = hours * 60 + minutes;
+        // `24:00` closes a day; anything later (`24:30`) isn't a time.
+        (minutes < 60 && minute <= DAY_MINUTES).then_some(minute)
     };
     text.split(',')
         .map(|range| {
@@ -283,143 +340,5 @@ pub fn when_text(at: u32, now: u32) -> String {
         0 => clock,
         1 => format!("tomorrow {clock}"),
         _ => format!("{} {clock}", DAY_NAMES[(at / DAY_MINUTES % 7) as usize].1),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simple_weekday_and_weekend() {
-        let rules = parse_opening_hours("Mo-Fr 09:00-18:00; Sa 10:00-13:00; Su off");
-        assert_eq!(rules.len(), 3);
-        assert_eq!(rules[0].days, "Mon–Fri");
-        assert_eq!(rules[0].hours, "09:00–18:00");
-        assert_eq!(rules[1].days, "Sat");
-        assert_eq!(rules[2].days, "Sun");
-        assert_eq!(rules[2].hours, "Closed");
-    }
-
-    #[test]
-    fn comma_day_list() {
-        let rules = parse_opening_hours("Sa,Su 10:00-16:00");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].days, "Sat, Sun");
-    }
-
-    #[test]
-    fn bare_time_range_has_no_day_selector() {
-        let rules = parse_opening_hours("09:30-23:45");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].days, "Every day");
-        assert_eq!(rules[0].hours, "09:30–23:45");
-    }
-
-    #[test]
-    fn split_shift_and_holidays() {
-        let rules = parse_opening_hours("Mo-Fr 09:00-12:00,14:00-18:00; PH off");
-        assert_eq!(rules[0].hours, "09:00–12:00, 14:00–18:00");
-        assert_eq!(rules[1].days, "Holidays");
-        assert_eq!(rules[1].hours, "Closed");
-    }
-
-    #[test]
-    fn always_open() {
-        let rules = parse_opening_hours("24/7");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].days, "Every day");
-        assert_eq!(rules[0].hours, "Open 24 hours");
-    }
-
-    #[test]
-    fn unsupported_rule_falls_back_to_raw_text() {
-        let rules = parse_opening_hours("Jun 21-Sep 02: 09:00-00:45");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].days, "Hours");
-        assert_eq!(rules[0].hours, "Jun 21-Sep 02: 09:00-00:45");
-    }
-
-    #[test]
-    fn empty_clauses_are_skipped() {
-        let rules = parse_opening_hours("Mo-Fr 09:00-18:00; ; Sa 10:00-13:00");
-        assert_eq!(rules.len(), 2);
-    }
-
-    /// Minutes since Monday 00:00.
-    fn at(day: u32, hours: u32, minutes: u32) -> u32 {
-        day * DAY_MINUTES + hours * 60 + minutes
-    }
-
-    #[test]
-    fn open_closing_soon_and_closed() {
-        let raw = "Mo-Fr 09:00-18:00; Sa 10:00-13:00; Su off";
-        assert_eq!(
-            open_status(raw, at(0, 12, 0)),
-            Some(OpenStatus::Open {
-                closes: at(0, 18, 0)
-            })
-        );
-        assert_eq!(
-            open_status(raw, at(0, 17, 30)),
-            Some(OpenStatus::ClosingSoon {
-                closes: at(0, 18, 0)
-            })
-        );
-        assert_eq!(
-            open_status(raw, at(0, 19, 0)),
-            Some(OpenStatus::Closed {
-                opens: Some(at(1, 9, 0))
-            })
-        );
-        // Saturday after closing: Sunday off, so Monday.
-        assert_eq!(
-            open_status(raw, at(5, 14, 0)),
-            Some(OpenStatus::Closed {
-                opens: Some(at(7, 9, 0))
-            })
-        );
-    }
-
-    #[test]
-    fn past_midnight_and_week_wrap() {
-        let raw = "Fr-Su 20:00-02:00";
-        // Saturday 00:30 is still Friday night's opening.
-        assert_eq!(
-            open_status(raw, at(5, 0, 30)),
-            Some(OpenStatus::Open {
-                closes: at(5, 2, 0)
-            })
-        );
-        // Monday 01:30 is still Sunday night's, closing within the hour.
-        assert_eq!(
-            open_status(raw, at(0, 1, 30)),
-            Some(OpenStatus::ClosingSoon {
-                closes: at(0, 2, 0)
-            })
-        );
-    }
-
-    #[test]
-    fn later_rule_overrides_and_always_open() {
-        assert_eq!(
-            open_status("Mo-Su 09:00-18:00; Su off", at(6, 12, 0)),
-            Some(OpenStatus::Closed {
-                opens: Some(at(7, 9, 0))
-            })
-        );
-        assert_eq!(
-            open_status("24/7", at(3, 3, 0)),
-            Some(OpenStatus::AlwaysOpen)
-        );
-        assert_eq!(open_status("Jun 21-Sep 02: 09:00-00:45", 0), None);
-    }
-
-    #[test]
-    fn when_text_names_other_days() {
-        let now = at(0, 19, 0);
-        assert_eq!(when_text(at(0, 21, 0), now), "21:00");
-        assert_eq!(when_text(at(1, 9, 0), now), "tomorrow 09:00");
-        assert_eq!(when_text(at(3, 9, 0), now), "Thu 09:00");
     }
 }

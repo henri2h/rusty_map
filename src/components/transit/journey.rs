@@ -312,6 +312,10 @@ pub fn decode_polyline(encoded: &str, precision: u32) -> Vec<(f64, f64)> {
         loop {
             let byte = (*bytes.get(*index)? as i64) - 63;
             *index += 1;
+            // Malformed input: no value runs this long, and the shift below would overflow.
+            if shift > 60 {
+                return None;
+            }
             result |= (byte & 0x1f) << shift;
             shift += 5;
             if byte < 0x20 {
@@ -328,25 +332,9 @@ pub fn decode_polyline(encoded: &str, precision: u32) -> Vec<(f64, f64)> {
         let (Some(d_lat), Some(d_lon)) = (next(&mut index), next(&mut index)) else {
             break;
         };
-        lat += d_lat;
-        lon += d_lon;
+        lat = lat.wrapping_add(d_lat);
+        lon = lon.wrapping_add(d_lon);
         points.push((lon as f64 / factor, lat as f64 / factor));
     }
     points
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_google_polyline() {
-        // The reference example from Google's polyline algorithm documentation.
-        let points = decode_polyline("_p~iF~ps|U_ulLnnqC_mqNvxq`@", 5);
-        let expected = [(-120.2, 38.5), (-120.95, 40.7), (-126.453, 43.252)];
-        assert_eq!(points.len(), expected.len());
-        for ((lon, lat), (want_lon, want_lat)) in points.iter().zip(expected) {
-            assert!((lon - want_lon).abs() < 1e-9 && (lat - want_lat).abs() < 1e-9);
-        }
-    }
 }

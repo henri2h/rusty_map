@@ -117,9 +117,6 @@ fn layers_modal(
     let show_only = |shown: Option<usize>| {
         let layers = layers.to_vec();
         move || {
-            if pull.moved() {
-                return;
-            }
             for (index, layer) in layers.iter().enumerate() {
                 let mut enabled = layer.enabled;
                 if *enabled.peek() != (Some(index) == shown) {
@@ -132,6 +129,10 @@ fn layers_modal(
     let tiles = rect()
         .horizontal()
         .spacing(12.0)
+        // Centred in the full-width sheet, not bunched on its left.
+        .maybe(screen.compact, |tiles| {
+            tiles.width(Size::fill()).main_align(Alignment::Center)
+        })
         .child(layer_tile(
             "Normal",
             lucide::map(),
@@ -261,6 +262,9 @@ fn layer_tile(
         .child(
             label()
                 .text(name)
+                // Full tile width: centred within an auto-sized label, the text was laid out
+                // against the tile's width and drawn shifted right of the icon.
+                .width(Size::fill())
                 .font_size(12.0)
                 .text_align(TextAlign::Center)
                 .color(if selected { TEXT } else { TEXT_MUTED }),

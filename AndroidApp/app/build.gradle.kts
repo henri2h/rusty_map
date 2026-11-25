@@ -39,6 +39,13 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    // Keep the Rust library's symbol table: stripped, panic backtraces in logcat (see
+    // `android::init_logging`) show `<unknown>` for every frame. Costs a few MB of APK.
+    packaging {
+        jniLibs {
+            keepDebugSymbols += "**/librusty_map.so"
+        }
+    }
 }
 
 tasks.register<Exec>("buildRustLibrary") {

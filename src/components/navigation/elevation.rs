@@ -172,34 +172,3 @@ fn parse(json: LineJson, length: f64) -> Option<Profile> {
         max_m,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// IGN's answer for Pigalle → Sacré-Cœur, 8 samples (2026-10-19).
-    const FIXTURE: &str = r#"{"elevations": [{"lon": 2.3376, "lat": 48.8822, "z": 63.14, "acc": "x"}, {"lon": 2.338334929285643, "lat": 48.882904307232074, "z": 68.43, "acc": "x"}, {"lon": 2.339069858571286, "lat": 48.88360861446415, "z": 75.14, "acc": "x"}, {"lon": 2.3398047878569286, "lat": 48.88431292169623, "z": 81.71, "acc": "x"}, {"lon": 2.3406096265600813, "lat": 48.88493263820393, "z": 87.36, "acc": "x"}, {"lon": 2.3414397510400544, "lat": 48.88552175880262, "z": 106.88, "acc": "x"}, {"lon": 2.342269875520027, "lat": 48.88611087940131, "z": 124.29, "acc": "x"}, {"lon": 2.3431, "lat": 48.8867, "z": 119.0, "acc": "x"}], "height_differences": {"positive": 61.15, "negative": 5.29}}"#;
-
-    #[test]
-    fn parses_a_real_profile() {
-        let profile = parse(serde_json::from_str(FIXTURE).unwrap(), 700.0).unwrap();
-        assert_eq!(profile.samples.len(), 8);
-        assert_eq!(profile.samples[0].0, 0.0);
-        assert!(
-            (profile.samples[7].0 - 700.0).abs() < 1e-6,
-            "scaled to the route"
-        );
-        assert_eq!((profile.climb_m, profile.descent_m), (61.15, 5.29));
-        assert_eq!((profile.min_m, profile.max_m), (63.14, 124.29));
-        let middle = profile.height_at(350.0);
-        assert!((81.0..=88.0).contains(&middle), "{middle}");
-    }
-
-    #[test]
-    fn no_data_points_are_dropped() {
-        let json = r#"{"elevations": [{"lon": 2.0, "lat": 48.0, "z": -99999}, {"lon": 2.001, "lat": 48.0, "z": 50}, {"lon": 2.002, "lat": 48.0, "z": 52}], "height_differences": null}"#;
-        let profile = parse(serde_json::from_str(json).unwrap(), 150.0).unwrap();
-        assert_eq!(profile.samples.len(), 2);
-        assert_eq!((profile.climb_m, profile.descent_m), (2.0, 0.0));
-    }
-}

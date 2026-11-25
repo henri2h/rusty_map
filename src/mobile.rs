@@ -23,6 +23,16 @@ pub struct Insets {
     pub top: f32,
     /// Navigation bar: gesture handle or buttons.
     pub bottom: f32,
+    /// On-screen keyboard, from the window's bottom edge (so covering the navigation bar), or
+    /// zero while hidden.
+    pub keyboard: f32,
+}
+
+impl Insets {
+    /// What covers the window's bottom edge: the keyboard while shown, else the navigation bar.
+    pub fn bottom_covered(&self) -> f32 {
+        self.bottom.max(self.keyboard)
+    }
 }
 
 /// Typical values until Android reports the real ones.
@@ -30,11 +40,13 @@ const DEFAULT_INSETS: Insets = if cfg!(target_os = "android") {
     Insets {
         top: 40.,
         bottom: 20.,
+        keyboard: 0.,
     }
 } else {
     Insets {
         top: 0.,
         bottom: 0.,
+        keyboard: 0.,
     }
 };
 
@@ -42,7 +54,7 @@ const DEFAULT_INSETS: Insets = if cfg!(target_os = "android") {
 static INSETS: LazyLock<watch::Sender<Insets>> =
     LazyLock::new(|| watch::Sender::new(DEFAULT_INSETS));
 
-/// `MainActivity.nativeSetInsets(top, bottom)`, in dp.
+/// `MainActivity.nativeSetInsets(top, bottom, keyboard)`, in dp.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_rustymap_app_MainActivity_nativeSetInsets(
@@ -50,9 +62,14 @@ pub extern "system" fn Java_dev_rustymap_app_MainActivity_nativeSetInsets(
     _class: *mut std::ffi::c_void,
     top: f32,
     bottom: f32,
+    keyboard: f32,
 ) {
     INSETS.send_if_modified(|current| {
-        let insets = Insets { top, bottom };
+        let insets = Insets {
+            top,
+            bottom,
+            keyboard,
+        };
         let changed = *current != insets;
         *current = insets;
         changed
@@ -228,6 +245,8 @@ pub(crate) fn call_activity(
 pub struct Screen {
     pub compact: bool,
     pub insets: Insets,
+    /// Physical pixels per logical pixel.
+    pub scale: f32,
 }
 
 impl Screen {
@@ -236,15 +255,24 @@ impl Screen {
     pub fn controls_top(&self) -> f32 {
         self.insets.top + if self.compact { 64. } else { 0. }
     }
+
+    /// The window's width or height (whichever the size is used for) less `less` logical
+    /// pixels. Size functions get the window in physical pixels, unlike every other value.
+    pub fn window_less(&self, less: f32) -> Size {
+        let less = less * self.scale;
+        Size::func_data(move |c| Some((c.root - less).max(0.0)), &(less as u32))
+    }
 }
 
 /// Provides the [`Screen`] to the tree under it, derived from the map's `viewport_size`. A memo,
 /// so that a window resize only re-renders the overlays when it crosses [`COMPACT_WIDTH`].
 pub fn use_provide_screen(viewport: State<Area>) -> Memo<Screen> {
     let insets = use_insets();
+    let scale_factor = use_hook(|| Platform::get().current_window().scale_factor);
     let screen = use_memo(move || Screen {
         compact: is_compact(viewport.read().width()),
         insets: *insets.read(),
+        scale: *scale_factor.read() as f32,
     });
     use_provide_context(move || screen);
     screen

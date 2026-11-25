@@ -5,13 +5,21 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use freya::prelude::*;
-use map_component::{MapController, TappedLine};
+use map_component::{IconGlyph, MapController, MapItem, MapLayer, TappedLine};
+
+use crate::components::search::util::search;
 
 use super::{
     api::Departure,
     osm_lines::{RouteInfo, TrackInfo, routes_from_tile},
     when::When,
 };
+
+/// The planner's start and destination dots on the map (see [`TransitController::show_endpoints`]).
+const ENDPOINTS_LAYER: u64 = 0x7472_6970; // "trip"
+/// Colors of the planner's start and destination, as on its fields.
+pub(crate) const START_COLOR: Color = Color::from_rgb(24, 128, 56);
+pub(crate) const END_COLOR: Color = Color::from_rgb(217, 48, 37);
 
 /// One end of a planned journey.
 #[derive(Clone, PartialEq)]
@@ -100,6 +108,9 @@ pub struct TransitController {
     pub picking: State<bool>,
     /// When the planned journey leaves or arrives.
     pub when: State<When>,
+    /// The selected itinerary's step-by-step view is open, in place of the planner's form and
+    /// list (see `planner::Itineraries`).
+    pub trip_open: State<bool>,
     pub mode: State<TravelMode>,
     /// The map, to draw and frame trips/journeys on it.
     pub map: MapController,
@@ -116,6 +127,7 @@ impl TransitController {
             active_field: use_state(|| Field::From),
             picking: use_state(|| false),
             when: use_state(When::default),
+            trip_open: use_state(|| false),
             mode: use_state(TravelMode::default),
             map,
         }
@@ -187,6 +199,8 @@ impl TransitController {
         self.close_view();
         self.to.set(to);
         self.planner_open.set(true);
+        self.close_trip();
+        self.show_endpoints();
         // The start is still unknown: invite picking it right away.
         self.start_picking(Field::From);
     }
@@ -208,8 +222,10 @@ impl TransitController {
     pub fn close_planner(&mut self) {
         self.stop_picking();
         self.planner_open.set(false);
+        self.close_trip();
         self.from.set(None);
         self.to.set(None);
+        self.show_endpoints();
         self.map.set_route_overlay(None);
     }
 
@@ -222,6 +238,8 @@ impl TransitController {
             Field::From => self.from.set(Some(endpoint)),
             Field::To => self.to.set(Some(endpoint)),
         }
+        self.close_trip();
+        self.show_endpoints();
         let other_empty = match field {
             Field::From => self.to.peek().is_none(),
             Field::To => self.from.peek().is_none(),
@@ -241,5 +259,76 @@ impl TransitController {
         let to = self.to.peek().clone();
         self.from.set(to);
         self.to.set(from);
+        self.close_trip();
+        self.show_endpoints();
+    }
+
+    /// Back from the selected itinerary's steps to the planner and its list.
+    pub fn close_trip(&mut self) {
+        if *self.trip_open.peek() {
+            self.trip_open.set(false);
+        }
+    }
+
+    /// Fills the active field with a point tapped on the map (see [`Self::set_endpoint`]), named
+    /// by its coordinates until its street address comes in.
+    pub fn set_map_point(&mut self, lat: f64, lon: f64) {
+        let placeholder = format!("Point on map ({lat:.4}, {lon:.4})");
+        self.set_endpoint(Endpoint {
+            name: placeholder.clone(),
+            lat,
+            lon,
+        });
+        let (mut from, mut to) = (self.from, self.to);
+        // In the window's scope: the tap's own element doesn't outlive a re-render.
+        spawn_in_window(async move {
+            let Ok(Some(address)) = search::reverse_address(lat, lon).await else {
+                return;
+            };
+            // Renamed only if still that point: it may have been replaced meanwhile.
+            for endpoint in [&mut from, &mut to] {
+                let unchanged = endpoint
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint.name == placeholder);
+                if unchanged {
+                    endpoint.set(Some(Endpoint {
+                        name: address.clone(),
+                        lat,
+                        lon,
+                    }));
+                }
+            }
+        });
+    }
+
+    /// Marks the planner's start and destination on the map, so a point picked on it shows
+    /// where it landed (and the route's ends stand out).
+    fn show_endpoints(&mut self) {
+        let dot = |endpoint: &Option<Endpoint>, id, color| {
+            endpoint.as_ref().map(|endpoint| {
+                MapItem::icon_lonlat(
+                    id,
+                    endpoint.lon,
+                    endpoint.lat,
+                    IconGlyph::Dot,
+                    0.0,
+                    color,
+                    18.0,
+                )
+            })
+        };
+        let items: Vec<MapItem> = [
+            dot(&self.from.peek(), 0, START_COLOR),
+            dot(&self.to.peek(), 1, END_COLOR),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if items.is_empty() {
+            self.map.remove_layer(ENDPOINTS_LAYER);
+        } else {
+            self.map.set_layer(MapLayer::new(ENDPOINTS_LAYER, items));
+        }
     }
 }

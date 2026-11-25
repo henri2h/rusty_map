@@ -12,10 +12,17 @@ use serde_json::Value;
 
 use map_component::util::tiles::{FetchError, background_runtime, client};
 
-/// Parses an OSM `wikipedia` tag (`"fr:Tour Eiffel"`) into `(lang, title)`.
+/// Parses an OSM `wikipedia` tag (`"fr:Tour Eiffel"`) into `(lang, title)`. `None` unless the
+/// language looks like a wiki code (`fr`, `zh-yue`, `simple`): it becomes the request's host name,
+/// so anything else in a tag would send the request elsewhere.
 pub fn parse_wikipedia_tag(tag: &str) -> Option<(String, String)> {
     let (lang, title) = tag.split_once(':')?;
-    if lang.is_empty() || title.is_empty() {
+    let (lang, title) = (lang.trim(), title.trim());
+    let is_wiki_code = (2..=16).contains(&lang.len())
+        && lang
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-');
+    if !is_wiki_code || title.is_empty() {
         return None;
     }
     Some((lang.to_string(), title.to_string()))

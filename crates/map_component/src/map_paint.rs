@@ -83,7 +83,9 @@ pub fn paint_map(
 
     // Ancestors contributing labels this frame — several pending tiles share one ancestor, and
     // its labels must be pushed only once.
-    let mut label_ancestors_seen: rustc_hash::FxHashSet<super::util::tiles::TileKey> =
+    // Keyed by grid column, not `TileKey`: at low zoom the repeating world shows the same
+    // ancestor more than once, each copy with its labels.
+    let mut label_ancestors_seen: rustc_hash::FxHashSet<(u32, i64, u32)> =
         rustc_hash::FxHashSet::default();
 
     for tile_y in tile_y_min..tile_y_max {
@@ -194,13 +196,14 @@ pub fn paint_map(
                         // The ancestor's places are the same places; the label pass's dedup and
                         // collision absorb any overlap with already-loaded neighbors' labels.
                         let ancestor_key =
-                            (viewport.zoom_z - levels, key.1 >> levels, key.2 >> levels);
+                            (viewport.zoom_z - levels, tile_x >> levels, key.2 >> levels);
                         if !ancestor.labels.is_empty() && label_ancestors_seen.insert(ancestor_key)
                         {
                             // The ancestor spans 2^levels current tiles; anchor its top-left at
                             // the screen position of the first tile it covers.
+                            // `tile_x`, not the wrapped `key.1`: this copy of the world.
                             let (anc_screen_x, anc_screen_y) = viewport.screen_pos(
-                                ((key.1 >> levels) as i64) << levels,
+                                (tile_x >> levels) << levels,
                                 ((key.2 >> levels) as i64) << levels,
                             );
                             label_tiles.push((

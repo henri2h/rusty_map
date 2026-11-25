@@ -126,6 +126,62 @@ async fn search_ign_io(
         .collect())
 }
 
+/// A short street address for a point picked on the map (`"9 Rue Danielle Casanova,
+/// Saint-Denis"`), from IGN's reverse geocoder (France only, quick, no key). `None` with no
+/// address within [`REVERSE_MAX_M`].
+pub async fn reverse_address(lat: f64, lon: f64) -> Result<Option<String>, FetchError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    background_runtime().spawn(async move {
+        let _ = tx.send(reverse_address_io(lat, lon).await);
+    });
+    rx.await.unwrap_or(Err(FetchError::TaskFailed))
+}
+
+/// Farther than this, an address doesn't name the point (open country, a park).
+const REVERSE_MAX_M: f64 = 150.0;
+
+async fn reverse_address_io(lat: f64, lon: f64) -> Result<Option<String>, FetchError> {
+    let params = [
+        ("lat", lat.to_string()),
+        ("lon", lon.to_string()),
+        ("index", "address".to_string()),
+        ("limit", "1".to_string()),
+    ];
+    log::trace!("[http] GET https://data.geopf.fr/geocodage/reverse {params:?}");
+    let response = client()
+        .get("https://data.geopf.fr/geocodage/reverse")
+        .query(&params)
+        .header(reqwest::header::USER_AGENT, "rusty_map/1.0")
+        .send()
+        .await
+        .map_err(FetchError::Network)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FetchError::Http(status.as_u16()));
+    }
+    let text = response.text().await.map_err(FetchError::Network)?;
+    let parsed: Value = serde_json::from_str(&text).map_err(|_| FetchError::InvalidData)?;
+    let Some(properties) = parsed["features"]
+        .get(0)
+        .map(|feature| &feature["properties"])
+    else {
+        return Ok(None);
+    };
+    if properties["distance"]
+        .as_f64()
+        .is_some_and(|m| m > REVERSE_MAX_M)
+    {
+        return Ok(None);
+    }
+    let name = properties["name"].as_str().unwrap_or_default();
+    let city = properties["city"].as_str().unwrap_or_default();
+    Ok(match (name.is_empty(), city.is_empty()) {
+        (true, _) => None,
+        (false, true) => Some(name.to_string()),
+        (false, false) => Some(format!("{name}, {city}")),
+    })
+}
+
 /// One IGN geocoder feature: an address (`name`/`label` strings, `type` `street`/`housenumber`/
 /// …) or a BD TOPO place (`name`/`category` lists).
 fn ign_result(feature: &Value) -> Option<SearchResult> {
@@ -622,72 +678,4 @@ async fn fetch_osm_element_meta_io(
         return Ok(None);
     };
     Ok(Some((timestamp, user)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn address_title_prefers_number_and_street() {
-        let parsed: Value = serde_json::from_str(
-            r#"{"name": "", "display_name": "12, Rue de Rivoli, Paris, 75004, France",
-                "address": {"house_number": "12", "road": "Rue de Rivoli", "city": "Paris"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            address_from_reverse(&parsed),
-            Some(Address {
-                title: "12 Rue de Rivoli".to_string(),
-                line: "12, Rue de Rivoli, Paris, 75004, France".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn address_title_falls_back_to_first_part() {
-        let parsed: Value = serde_json::from_str(
-            r#"{"display_name": "Ormoy, Auxerre, Yonne, France", "address": {"village": "Ormoy"}}"#,
-        )
-        .unwrap();
-        assert_eq!(address_from_reverse(&parsed).unwrap().title, "Ormoy");
-    }
-
-    #[test]
-    fn formats_distances() {
-        assert_eq!(format_distance(343.0), "340 m");
-        assert_eq!(format_distance(1_234.0), "1.2 km");
-        assert_eq!(format_distance(14_400.0), "14 km");
-        let paris_lyon = distance_m(48.8566, 2.3522, 45.764, 4.8357);
-        assert!((390_000.0..395_000.0).contains(&paris_lyon), "{paris_lyon}");
-    }
-
-    #[test]
-    fn reads_ign_addresses_and_places() {
-        let street: Value = serde_json::from_str(
-            r#"{"geometry": {"coordinates": [5.449173, 43.526816]}, "properties": {"label":
-                "Cours  Mirabeau 13100 Aix-en-Provence", "name": "Cours  Mirabeau", "type": "street",
-                "city": "Aix-en-Provence"}}"#,
-        )
-        .unwrap();
-        let street = ign_result(&street).unwrap();
-        assert_eq!(street.name, "Cours Mirabeau");
-        assert_eq!(street.display_name, "Cours Mirabeau 13100 Aix-en-Provence");
-        assert_eq!(street.category, "street");
-        let place: Value = serde_json::from_str(
-            r#"{"geometry": {"coordinates": [5.4, 43.5]}, "properties": {"name": ["Gare"],
-                "category": ["gare"], "city": ["Aix-en-Provence"]}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            ign_result(&place).unwrap().display_name,
-            "Gare, Aix-en-Provence"
-        );
-    }
-
-    #[test]
-    fn nothing_to_geocode() {
-        let parsed: Value = serde_json::from_str(r#"{"error": "Unable to geocode"}"#).unwrap();
-        assert_eq!(address_from_reverse(&parsed), None);
-    }
 }

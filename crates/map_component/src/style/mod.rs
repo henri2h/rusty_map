@@ -464,6 +464,11 @@ pub fn parse_color_str(s: &str) -> Option<Color> {
 }
 
 fn parse_hex(hex: &str) -> Option<Color> {
+    // Checked up front: the byte slicing below would panic inside a multi-byte character, and
+    // `from_str_radix` would accept a sign (`"+f"`).
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     let component = |slice: &str| {
         let full = if slice.len() == 1 {
             slice.repeat(2)

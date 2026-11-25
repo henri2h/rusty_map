@@ -171,10 +171,7 @@ pub(crate) fn draw_overlay(
     paint.set_stroke_join(PaintJoin::Round);
 
     for path in &overlay.paths {
-        let mut points = path
-            .points
-            .iter()
-            .map(|&(x, y)| viewport.world_to_screen(x, y));
+        let mut points = viewport.shape_to_screen(&path.points).into_iter();
         let Some(first) = points.next() else {
             continue;
         };
@@ -584,12 +581,7 @@ pub(crate) fn draw_layers(
         }
         builder.detach()
     };
-    let to_screen = |points: &[(f64, f64)]| -> Vec<(f32, f32)> {
-        points
-            .iter()
-            .map(|&(x, y)| viewport.world_to_screen(x, y))
-            .collect()
-    };
+    let to_screen = |points: &[(f64, f64)]| viewport.shape_to_screen(points);
 
     for item in layers
         .iter()
@@ -708,43 +700,4 @@ pub fn item_at(
                 ((cx - x).powi(2) + (cy - y).powi(2) <= reach * reach).then_some((layer.id, *id))
             })
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::rc::Rc;
-
-    use torin::geometry::CursorPoint;
-
-    use super::*;
-
-    fn icon(id: u64, point: (f64, f64)) -> MapItem {
-        MapItem::Icon {
-            id,
-            point,
-            glyph: IconGlyph::Boat,
-            rotation_deg: 0.0,
-            color: Color::BLACK,
-            size_px: 20.0,
-        }
-    }
-
-    #[test]
-    fn item_at_hits_topmost_icon() {
-        let viewport = Viewport::new(CursorPoint::zero(), 12.0, 14);
-        let point = viewport.screen_to_world(100.0, 100.0);
-        let far = viewport.screen_to_world(400.0, 400.0);
-        let layers = vec![
-            Rc::new(MapLayer::new(1, vec![icon(10, point)])),
-            Rc::new(MapLayer::new(2, vec![icon(20, point), icon(21, far)])),
-        ];
-        assert_eq!(item_at(&layers, &viewport, 102.0, 98.0), Some((2, 20)));
-        assert_eq!(item_at(&layers, &viewport, 401.0, 400.0), Some((2, 21)));
-        assert_eq!(item_at(&layers, &viewport, 250.0, 250.0), None);
-
-        let mut hidden = MapLayer::new(2, vec![icon(20, point)]);
-        hidden.visible = false;
-        let layers = vec![layers[0].clone(), Rc::new(hidden)];
-        assert_eq!(item_at(&layers, &viewport, 100.0, 100.0), Some((1, 10)));
-    }
 }

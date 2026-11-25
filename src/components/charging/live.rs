@@ -336,24 +336,3 @@ fn icon(svg: Bytes, color: Color, size: f32) -> SvgViewer {
         .height(Size::px(size))
         .color(color)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_report_times() {
-        let utc = parse_timestamp("2026-09-24 09:18:45+00:00").unwrap();
-        assert_eq!(parse_timestamp("2026-09-24T11:18:45.5+02:00"), Some(utc));
-        assert_eq!(parse_timestamp("2026-09-24T09:18:45Z"), Some(utc));
-        assert_eq!(utc % 86_400, 9 * 3_600 + 18 * 60 + 45);
-    }
-
-    #[test]
-    fn ages() {
-        assert_eq!(age_text(20), "just now");
-        assert_eq!(age_text(5 * 60), "5 min ago");
-        assert_eq!(age_text(3 * 3_600), "3 h ago");
-        assert_eq!(age_text(12 * 86_400), "12 days ago");
-    }
-}

@@ -42,9 +42,10 @@ pub fn lonlat_to_world(lon: f64, lat: f64) -> (f64, f64) {
     (x, y)
 }
 
-/// Inverse of [`lonlat_to_world`].
+/// Inverse of [`lonlat_to_world`]. The world repeats sideways, so any `world_x` maps back onto
+/// `-180..180`.
 pub fn world_to_lonlat(world_x: f64, world_y: f64) -> (f64, f64) {
-    let lon = world_x * 360.0 - 180.0;
+    let lon = world_x.rem_euclid(1.0) * 360.0 - 180.0;
     let lat = (std::f64::consts::PI * (1.0 - 2.0 * world_y))
         .sinh()
         .atan()
@@ -60,6 +61,18 @@ pub fn lonlat_to_center(lon: f64, lat: f64) -> CursorPoint {
     CursorPoint::new(
         world_x * scale - ORIGIN_TILE_X,
         world_y * scale - ORIGIN_TILE_Y,
+    )
+}
+
+/// The world's width in `center` units (`ORIGIN_ZOOM` tiles).
+const WORLD_CENTER_UNITS: f64 = (1u32 << ORIGIN_ZOOM as u32) as f64;
+
+/// `center` moved onto the primary copy of the sideways-repeating world, the same place on the
+/// map: panning past the antimeridian carries on into the other side instead of off the grid.
+pub fn wrap_center(center: CursorPoint) -> CursorPoint {
+    CursorPoint::new(
+        (ORIGIN_TILE_X + center.x).rem_euclid(WORLD_CENTER_UNITS) - ORIGIN_TILE_X,
+        center.y,
     )
 }
 
@@ -104,6 +117,7 @@ pub struct Viewport {
 
 impl Viewport {
     pub fn new(center: CursorPoint, zoom: f32, max_real_zoom: u32) -> Self {
+        let center = wrap_center(center);
         let zoom_z = zoom.round().min(max_real_zoom as f32);
         let tile_px = TILE_SIZE * 2f32.powf(zoom - zoom_z);
         let origin_scale = 2f64.powi(zoom_z as i32 - ORIGIN_ZOOM as i32);
@@ -129,15 +143,29 @@ impl Viewport {
         )
     }
 
-    /// `None` when the coordinate falls outside the real tile grid at `zoom_z` (negative, or past
-    /// `2^zoom_z - 1`) — those positions have no tile to fetch or draw, and clamping them instead
-    /// used to draw/fetch the edge tile several times over at the world's border.
+    /// The tile at grid position `(tile_x, tile_y)`. The world repeats sideways, so `tile_x` wraps
+    /// round (past the last column comes the first again); `None` above or below the grid, where
+    /// there is no tile — clamping instead drew the edge tile several times over.
     pub fn tile_key(&self, tile_x: i64, tile_y: i64) -> Option<TileKey> {
         let max = 1i64 << self.zoom_z;
-        if tile_x < 0 || tile_y < 0 || tile_x >= max || tile_y >= max {
+        if tile_y < 0 || tile_y >= max {
             return None;
         }
-        Some((self.zoom_z, tile_x as u32, tile_y as u32))
+        Some((self.zoom_z, tile_x.rem_euclid(max) as u32, tile_y as u32))
+    }
+
+    /// Grid column of the copy of tile column `tile_x` (as in a [`TileKey`]) the view shows: the
+    /// one from the view's left edge onwards. Inverse of [`Self::tile_key`]'s wrapping.
+    pub fn view_tile_x(&self, tile_x: u32) -> i64 {
+        let left = self.center_real_x.floor() as i64;
+        left + (tile_x as i64 - left).rem_euclid(1i64 << self.zoom_z)
+    }
+
+    /// `world_x` moved by whole worlds onto the copy nearest the view (from a quarter world left
+    /// of its left edge), so a marker or route past the antimeridian is drawn where it's seen.
+    pub fn view_world_x(&self, world_x: f64) -> f64 {
+        let left = self.center_real_x / 2f64.powi(self.zoom_z as i32);
+        left - 0.25 + (world_x - left + 0.25).rem_euclid(1.0)
     }
 
     pub fn screen_pos(&self, tile_x: i64, tile_y: i64) -> (f32, f32) {
@@ -162,8 +190,28 @@ impl Viewport {
         2f64.powi(self.zoom_z as i32) * self.tile_px as f64
     }
 
-    /// Inverse of [`Self::screen_to_world`] for the current frame's viewport.
+    /// `points` (world coordinates) on screen, moved together onto the world copy nearest the
+    /// view — by the first point's shift, so a line or shape stays in one piece.
+    pub fn shape_to_screen(&self, points: &[(f64, f64)]) -> Vec<(f32, f32)> {
+        let shift = points
+            .first()
+            .map_or(0.0, |&(x, _)| self.view_world_x(x) - x);
+        points
+            .iter()
+            .map(|&(x, y)| self.world_to_screen_exact(x + shift, y))
+            .collect()
+    }
+
+    /// Inverse of [`Self::screen_to_world`] for the current frame's viewport, on the copy of the
+    /// world nearest the view (see [`Self::view_world_x`]).
     pub fn world_to_screen(&self, world_x: f64, world_y: f64) -> (f32, f32) {
+        self.world_to_screen_exact(self.view_world_x(world_x), world_y)
+    }
+
+    /// [`Self::world_to_screen`] without picking a world copy: for the points of one line or
+    /// shape, moved together (by their first point's [`Self::view_world_x`] shift) so it isn't
+    /// torn apart where points land on different copies.
+    pub fn world_to_screen_exact(&self, world_x: f64, world_y: f64) -> (f32, f32) {
         let scale = 2f64.powi(self.zoom_z as i32);
         (
             ((world_x * scale - self.center_real_x) * self.tile_px as f64) as f32,
@@ -187,6 +235,7 @@ impl Viewport {
         mouse: CursorPoint,
         max_real_zoom: u32,
     ) -> CursorPoint {
+        let center = wrap_center(center);
         let old_viewport = Viewport::new(center, old_zoom, max_real_zoom);
 
         // Real tile-space point (at the *old* zoom level) currently under the mouse.

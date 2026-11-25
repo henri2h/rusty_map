@@ -36,9 +36,10 @@ use crate::{
         panoramax::StreetPhotos,
         place::{PlaceController, SelectedPlace, humanize},
         poi_icon::poi_icon,
+        sheet::{Detent, SheetState, use_sheet_state},
         transit::{
             Departures, Endpoint, LineView, Planner, TrackView, TransitController, TransitView,
-            TripView, central_european_offset,
+            TripView, central_european_offset, refit_route,
         },
     },
     mobile::{
@@ -270,8 +271,11 @@ impl Component for SearchPanel {
         let input_id = use_a11y();
         let input_focus = use_focus(input_id);
         let screen = use_screen();
-        let mut sheet_expanded = use_state(|| false);
+        let screen_memo = use_consume::<Memo<Screen>>();
+        // The search sheet's pull-to-close; the drawer sheet has detents (`sheet_state`).
         let pull = use_sheet_pull();
+        let mut sheet_state = use_sheet_state();
+        let sheet_offset = sheet_state.use_offset();
         // The sheet's scrolled content, so a pull anywhere on it doesn't fight its scrolling.
         let sheet_scroll = use_sheet_scroll();
         use_provide_context(move || sheet_scroll);
@@ -282,9 +286,40 @@ impl Component for SearchPanel {
             move || {
                 let open =
                     selected.read().is_some() || view.read().is_some() || *planner_open.read();
-                if !open && *sheet_expanded.peek() {
-                    sheet_expanded.set(false);
+                if !open {
+                    sheet_state.reset();
                 }
+            }
+        });
+        // Picking a point on the map (phone): the sheet makes way for the map, down to its
+        // header, then comes back up — to the trips once both ends are set, else full height
+        // for typing an address.
+        let mut was_picking = use_state(|| false);
+        use_side_effect({
+            let (picking, planner_open) = (transit.picking, transit.planner_open);
+            let (from, to) = (transit.from, transit.to);
+            let map = map.clone();
+            move || {
+                let picking = *picking.read() && *planner_open.read();
+                if picking == *was_picking.peek() {
+                    return;
+                }
+                was_picking.set(picking);
+                let screen = *screen_memo.peek();
+                if !screen.compact {
+                    return;
+                }
+                let window_height = map.viewport_size.peek().size.height;
+                let detent = if picking {
+                    Detent::Collapsed
+                } else if !*planner_open.peek() {
+                    return;
+                } else if from.peek().is_some() && to.peek().is_some() {
+                    Detent::Half
+                } else {
+                    Detent::Full
+                };
+                sheet_state.set_detent(detent, screen, window_height);
             }
         });
 
@@ -305,6 +340,30 @@ impl Component for SearchPanel {
                     selected: None,
                     glyph: MarkerGlyph::Dot,
                 }));
+            }
+        });
+
+        // The sheet coming to rest at another height (phone) re-frames a drawn route (a trip,
+        // a line) in the map it now leaves: collapsed, the trip fills it; back up, none of it
+        // hides under the sheet.
+        let mut framed_for = use_state(|| Detent::Half);
+        use_side_effect({
+            let mut map = map.clone();
+            let (planner_open, view) = (transit.planner_open, transit.view);
+            move || {
+                let detent = sheet_state.detent();
+                if detent == *framed_for.peek() {
+                    return;
+                }
+                framed_for.set(detent);
+                let screen = *screen_memo.peek();
+                let showing_route = *planner_open.peek() || view.peek().is_some();
+                // Full height leaves no map to frame anything in.
+                if !screen.compact || !showing_route || detent == Detent::Full {
+                    return;
+                }
+                let window_height = map.viewport_size.peek().size.height;
+                refit_route(&mut map, detent.height(screen, window_height));
             }
         });
 
@@ -332,6 +391,7 @@ impl Component for SearchPanel {
                 map,
                 places,
                 search,
+                input_id,
             )
         });
         let rounded = !drawer_open && dropdown.is_none();
@@ -401,6 +461,7 @@ impl Component for SearchPanel {
                 move |text: String| {
                     places.clear();
                     search_query_in_view(text, &map, &mut search);
+                    input_id.request_unfocus();
                 }
             });
         if !has_query {
@@ -438,6 +499,8 @@ impl Component for SearchPanel {
             );
         }
 
+        // Below full height a drag on the drawer's content moves the sheet, not the content.
+        let content_scrolls = !screen.compact || sheet_state.content_scrolls();
         let content: Vec<Element> = if planner_open {
             vec![Planner {}.into_element()]
         } else {
@@ -465,7 +528,7 @@ impl Component for SearchPanel {
                     .cloned()
                     .collect();
                 if !saved.is_empty() {
-                    content.push(favorite_chips(saved, map, places, search));
+                    content.push(favorite_chips(saved, map, places, search, input_id));
                 }
                 let categories: Vec<&'static Category> = CATEGORIES
                     .iter()
@@ -476,12 +539,23 @@ impl Component for SearchPanel {
                     })
                     .collect();
                 if !categories.is_empty() {
-                    content.push(category_chips(categories, sprites.as_deref(), map, search));
+                    content.push(category_chips(
+                        categories,
+                        sprites.as_deref(),
+                        map,
+                        search,
+                        input_id,
+                    ));
                 }
             }
             content.extend(dropdown);
             if let Some(view) = view {
-                content.push(transit_view(view, transit.clone(), sheet_scroll));
+                content.push(transit_view(
+                    view,
+                    transit.clone(),
+                    sheet_scroll,
+                    content_scrolls,
+                ));
             } else if let Some(place) = place {
                 content.push(
                     place_details(
@@ -490,6 +564,7 @@ impl Component for SearchPanel {
                         favorites,
                         sheet_scroll,
                         screen.compact,
+                        content_scrolls,
                     )
                     .into_element(),
                 );
@@ -515,6 +590,8 @@ impl Component for SearchPanel {
                 }
                 if transit.view.peek().is_some() {
                     transit.close_view();
+                } else if *transit.trip_open.peek() {
+                    transit.close_trip();
                 } else if *transit.planner_open.peek() {
                     transit.close_planner();
                 } else {
@@ -525,13 +602,28 @@ impl Component for SearchPanel {
             }
         };
 
-        let panel = if sheet {
-            bottom_sheet(screen, *sheet_expanded.read(), pull.offset())
+        let window_height = map.viewport_size.read().size.height;
+        let panel = if searching {
+            // Typing takes the full height: at half height the keyboard hid the results. Once a
+            // search runs (Enter, a chip) the box lets go of the keyboard and the sheet drops
+            // back to half height, uncovering the results' pins on the map above it.
+            let detent = if input_focus().is_focused() {
+                Detent::Full
+            } else {
+                Detent::Half
+            };
+            let height = detent.height(screen, window_height);
+            sheet_state.publish_cover(height, screen, window_height);
+            bottom_sheet(screen, height, pull.offset())
+        } else if sheet {
+            let height = sheet_state.detent().height(screen, window_height);
+            sheet_state.publish_cover(height, screen, window_height);
+            bottom_sheet(screen, height, sheet_offset)
         } else if screen.compact {
             rect()
                 .position(Position::new_absolute().top(0.0f32).left(0.0f32))
                 // The window's width less the margins on both sides.
-                .width(Size::func_data(|c| Some(c.root - 24.0), &"pill"))
+                .width(screen.window_less(24.0))
                 .margin((12.0 + screen.insets.top, 12.0, 12.0, 12.0))
                 .padding(8.0f32)
         } else {
@@ -553,8 +645,11 @@ impl Component for SearchPanel {
                     (8.0, 8.0, 8.0, 8.0)
                 })
         };
-        // What pulling the sheet down (or tapping its bar) does: end the search; else shrink a
-        // full-height sheet; else close what it shows, as back does.
+        if !sheet {
+            sheet_state.publish_cover(0.0, screen, window_height);
+        }
+        // What pulling the sheet down (or tapping the search sheet's bar) does: end the search;
+        // else (a pull down from the collapsed drawer) close what it shows, as back does.
         let close_sheet = {
             let mut places = places.clone();
             let mut search = search.clone();
@@ -563,10 +658,10 @@ impl Component for SearchPanel {
                 if searching {
                     search.reset(String::new());
                     input_id.request_unfocus();
-                } else if *sheet_expanded.peek() {
-                    sheet_expanded.set(false);
                 } else if transit.view.peek().is_some() {
                     transit.close_view();
+                } else if *transit.trip_open.peek() {
+                    transit.close_trip();
                 } else if *transit.planner_open.peek() {
                     transit.close_planner();
                 } else {
@@ -578,11 +673,37 @@ impl Component for SearchPanel {
         let handle = if searching {
             sheet_handle(pull, close_sheet.clone())
         } else if sheet {
-            sheet_handle(pull, move || sheet_expanded.toggle())
+            drawer_handle(sheet_state, screen, window_height)
         } else {
             // Keeps the children's positions, and so the input and its focus, when the pill
             // turns into the sheet.
             rect().into_element()
+        };
+
+        // The whole sheet drags, not only its grab bar (unless its content is scrolled).
+        let on_close = {
+            let mut close_sheet = close_sheet;
+            move || {
+                haptic(Haptic::Press);
+                close_sheet();
+            }
+        };
+        let panel = if searching {
+            panel
+                .on_pointer_down(pull.on_sheet_grab(sheet_scroll))
+                .on_global_pointer_move(pull.on_move())
+                .on_global_pointer_up(pull.on_release(on_close))
+        } else if sheet {
+            panel
+                .on_pointer_down(sheet_state.on_sheet_grab(sheet_scroll))
+                .on_global_pointer_move(sheet_state.on_move(screen, window_height))
+                .on_capture_global_pointer_up(sheet_state.on_release(
+                    screen,
+                    window_height,
+                    on_close,
+                ))
+        } else {
+            panel
         };
 
         panel
@@ -609,36 +730,25 @@ impl Component for SearchPanel {
             .layer(Layer::OverlayLevel(2))
             .vertical()
             .on_global_key_down(on_back)
-            // The whole sheet pulls down, not only its grab bar (see `on_sheet_pull_start`).
-            .maybe(sheet, |r| {
-                r.on_pointer_down(pull.on_sheet_grab(sheet_scroll))
-            })
-            .on_global_pointer_move(pull.on_move())
-            .on_global_pointer_up(pull.on_release({
-                let mut close_sheet = close_sheet;
-                move || {
-                    haptic(Haptic::Press);
-                    close_sheet();
-                }
-            }))
             .child(handle)
             .children(content)
     }
 }
 
-/// Compact layout's drawer and search: a sheet along the bottom edge, leaving the top of the map
-/// visible, or `full` height; `pulled` down by that much (see [`SheetPull`]).
-fn bottom_sheet(screen: Screen, full: bool, pulled: f32) -> Rect {
-    let top = screen.insets.top;
+/// Compact layout's drawer and search: a sheet along the bottom edge, `height` tall, drawn
+/// `offset` lower (a drag or its settling; negative: higher, the sheet taller).
+fn bottom_sheet(screen: Screen, height: f32, offset: f32) -> Rect {
     rect()
-        .position(Position::new_absolute().bottom(-pulled).left(0.0f32))
+        // Lower: slid down, its content unmoved; higher: taller, showing more of it.
+        .position(
+            Position::new_absolute()
+                .bottom(-offset.max(0.0))
+                .left(0.0f32),
+        )
         .width(Size::window_percent(100.))
-        .height(if full {
-            Size::func_data(move |c| Some(c.root - top), &(top as u32))
-        } else {
-            Size::window_percent(SHEET_PERCENT)
-        })
-        .padding((0.0, 16.0, 16.0 + screen.insets.bottom, 16.0))
+        .height(Size::px((height - offset.min(0.0)).max(0.0)))
+        // Content kept above the keyboard, which covers the window rather than shrinking it.
+        .padding((0.0, 16.0, 16.0 + screen.insets.bottom_covered(), 16.0))
         .corner_radius((16.0f32, 16.0f32, 0.0f32, 0.0f32))
         .shadow((
             0.0f32,
@@ -662,8 +772,41 @@ fn sheet_handle(pull: SheetPull, mut on_press: impl FnMut() + 'static) -> Elemen
         .into_element()
 }
 
+/// The drawer sheet's grab bar: dragging it moves the sheet between its detents (see
+/// [`SheetState`]); a tap raises it a step, or lowers it from full height.
+fn drawer_handle(state: SheetState, screen: Screen, window_height: f32) -> Element {
+    let mut on_press = state;
+    rect()
+        .width(Size::fill())
+        .padding((12.0f32, 0.0f32))
+        .center()
+        .cursor(CursorIcon::Pointer)
+        .on_pointer_down(state.on_grab())
+        .on_press(move |_: Event<PressEventData>| {
+            if !on_press.moved() {
+                haptic(Haptic::Press);
+                let detent = on_press.peek_detent().tapped();
+                on_press.set_detent(detent, screen, window_height);
+            }
+        })
+        .child(
+            rect()
+                .width(Size::px(36.))
+                .height(Size::px(4.))
+                .corner_radius(2.)
+                .background(DIVIDER),
+        )
+        .into_element()
+}
+
 /// A transit view (tapped track, a line, or a trip) under a "Back" row returning to what was there.
-fn transit_view(view: TransitView, transit: TransitController, scroll: SheetScroll) -> Element {
+/// `content_scrolls`: whether its content drag-scrolls (see [`SheetState::content_scrolls`]).
+fn transit_view(
+    view: TransitView,
+    transit: TransitController,
+    scroll: SheetScroll,
+    content_scrolls: bool,
+) -> Element {
     let mut close = transit.clone();
     let content = match view {
         TransitView::Line { id, route, way_id } => LineView { id, route, way_id }.into_element(),
@@ -725,6 +868,7 @@ fn transit_view(view: TransitView, transit: TransitController, scroll: SheetScro
         .child(
             scroll
                 .track(ScrollView::new())
+                .drag_scrolling(content_scrolls)
                 .height(Size::fill())
                 .direction(Direction::vertical())
                 .margin((8.0f32, 0.0f32, 0.0f32, 0.0f32))
@@ -753,6 +897,7 @@ fn divider() -> impl IntoElement {
 /// Older results stay visible while a refined query is still debouncing/in flight, rather than
 /// flashing to "Searching…" on every keystroke. `fill`: down to the bottom of the search sheet
 /// (compact layout) rather than a capped dropdown.
+#[allow(clippy::too_many_arguments)]
 fn results_dropdown(
     status: SearchStatus,
     results: Vec<SearchResult>,
@@ -761,6 +906,7 @@ fn results_dropdown(
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
+    input_id: AccessibilityId,
 ) -> Element {
     let sprites = map.sprites.read().clone();
     // Distances from the user when located, else from the middle of the visible map.
@@ -787,7 +933,16 @@ fn results_dropdown(
             .direction(Direction::vertical())
             .child(scroll.marker())
             .children(results.into_iter().map(|result| {
-                result_row(result, origin, sprites.as_deref(), map, places, search).into_element()
+                result_row(
+                    result,
+                    origin,
+                    sprites.as_deref(),
+                    map,
+                    places,
+                    search,
+                    input_id,
+                )
+                .into_element()
             }))
             .into_element()
     } else {
@@ -824,6 +979,7 @@ fn results_dropdown(
         .into_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn result_row(
     result: SearchResult,
     (origin_lat, origin_lon): (f64, f64),
@@ -831,6 +987,7 @@ fn result_row(
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
+    input_id: AccessibilityId,
 ) -> impl IntoElement {
     let title = result.title().to_string();
     let subtitle = [humanize(&result.category), result.display_name.clone()]
@@ -857,7 +1014,9 @@ fn result_row(
         .flat()
         .width(Size::fill())
         .on_press(move |_: Event<PressEventData>| {
-            pick_result(&result, &map, &mut places, &mut search)
+            pick_result(&result, &map, &mut places, &mut search);
+            // Done typing: on a phone the keyboard would stay up over the place.
+            input_id.request_unfocus();
         })
         .child(
             rect()
@@ -955,6 +1114,7 @@ fn favorite_chips(
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
+    input_id: AccessibilityId,
 ) -> Element {
     let place_chips = favorites.into_iter().map(|favorite| {
         let map = map.clone();
@@ -965,6 +1125,7 @@ fn favorite_chips(
             fly_to(&map, favorite.lat, favorite.lon);
             search.reset(favorite.name.clone());
             places.select_favorite(&favorite, map.platform.clone());
+            input_id.request_unfocus();
         })
     });
     ScrollView::new()
@@ -988,6 +1149,7 @@ fn category_chips(
     sprites: Option<&SpriteSheet>,
     map: &MapController,
     search: &SearchController,
+    input_id: AccessibilityId,
 ) -> Element {
     let chips = categories.into_iter().map(|category| {
         let map = map.clone();
@@ -995,7 +1157,11 @@ fn category_chips(
         chip(
             poi_icon(sprites, category.kind, None, 14.0, TEXT_MUTED),
             category.label,
-            move || search_category(category, &map, &mut search),
+            move || {
+                search_category(category, &map, &mut search);
+                // Hides the keyboard, which drops the sheet to half height (see `full`).
+                input_id.request_unfocus();
+            },
         )
     });
     ScrollView::new()
@@ -1248,6 +1414,7 @@ fn place_details(
     mut favorites: Favorites,
     scroll: SheetScroll,
     compact: bool,
+    content_scrolls: bool,
 ) -> impl IntoElement {
     let favorite = Favorite::from_place(&place);
     let saved = favorite
@@ -1308,24 +1475,24 @@ fn place_details(
     };
 
     let mut body: Vec<Element> = Vec::new();
-    if let Some(image) = image {
-        body.push(
-            rect()
-                .width(Size::fill())
-                .height(Size::px(180.0))
-                .corner_radius(12.0f32)
-                .overflow(Overflow::Clip)
-                .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32))
-                .child(
-                    ImageViewer::new(image)
-                        .width(Size::fill())
-                        .height(Size::fill())
-                        .aspect_ratio(AspectRatio::Max)
-                        .image_cover(ImageCover::Center),
-                )
-                .into_element(),
-        );
-    }
+    // Placed under the actions, not above them: it arrives with the details, a moment after the
+    // panel opens, and on top it pushed Directions down just as it was being reached for.
+    let photo = image.map(|image| {
+        rect()
+            .width(Size::fill())
+            .height(Size::px(180.0))
+            .corner_radius(12.0f32)
+            .overflow(Overflow::Clip)
+            .margin((0.0f32, 0.0f32, 12.0f32, 0.0f32))
+            .child(
+                ImageViewer::new(image)
+                    .width(Size::fill())
+                    .height(Size::fill())
+                    .aspect_ratio(AspectRatio::Max)
+                    .image_cover(ImageCover::Center),
+            )
+            .into_element()
+    });
     if !subtitle.is_empty() {
         body.push(
             rect()
@@ -1519,6 +1686,7 @@ fn place_details(
             );
         }
     }
+    body.extend(photo);
     if let Some(station_id) = charger {
         body.push(
             ChargerLive {
@@ -1620,6 +1788,7 @@ fn place_details(
 
     scroll
         .track(ScrollView::new())
+        .drag_scrolling(content_scrolls)
         .height(Size::fill())
         .direction(Direction::vertical())
         .margin((16.0f32, 0.0f32, 0.0f32, 0.0f32))
@@ -2262,17 +2431,4 @@ impl Component for RawTags {
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_words_name_categories() {
-        assert_eq!(category_for(" Boulangerie ").unwrap().label, "Bakeries");
-        assert_eq!(category_for("médecin").unwrap().label, "Health");
-        assert_eq!(category_for("cafés").unwrap().label, "Cafés");
-        assert!(category_for("Boulangerie Paul").is_none());
-    }
 }
