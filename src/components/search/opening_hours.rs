@@ -37,11 +37,17 @@ fn is_time_ranges(text: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, ':' | '-' | ',' | '+' | ' '))
 }
 
+/// `off` / `closed`: the rule's days are closed.
+fn is_closed(hours: &str) -> bool {
+    hours.eq_ignore_ascii_case("off") || hours.eq_ignore_ascii_case("closed")
+}
+
 /// Strictly clock ranges, `09:00-12:00, 14:00-18:00+`: unlike [`is_time_ranges`], no stray
 /// digits (`"02: 09:00-00:45"`, the end of a date before its hours).
 fn is_clock_ranges(text: &str) -> bool {
     let is_clock = |time: &str| {
-        time.trim_end_matches('+')
+        time.trim()
+            .trim_end_matches('+')
             .split_once(':')
             .is_some_and(|(hours, minutes)| {
                 (1..=2).contains(&hours.len())
@@ -69,7 +75,7 @@ fn format_time_ranges(text: &str) -> String {
 }
 
 fn format_hours(text: &str) -> String {
-    if text.eq_ignore_ascii_case("off") || text.eq_ignore_ascii_case("closed") {
+    if is_closed(text) {
         "Closed".to_string()
     } else if is_time_ranges(text) {
         format_time_ranges(text)
@@ -146,10 +152,7 @@ fn split_selector(rule: &str) -> Option<OpeningRule> {
         .filter(|(_, c)| c.is_whitespace())
         .map(|(at, _)| (rule[..at].trim(), rule[at..].trim()))
         .find(|(selector, hours)| {
-            !selector.is_empty()
-                && (is_clock_ranges(hours)
-                    || hours.eq_ignore_ascii_case("off")
-                    || hours.eq_ignore_ascii_case("closed"))
+            !selector.is_empty() && (is_clock_ranges(hours) || is_closed(hours))
         })?;
     let days = selector
         .split_whitespace()
@@ -257,7 +260,7 @@ fn week_schedule(raw: &str) -> Option<[Vec<(u32, u32)>; 7]> {
             continue;
         }
         let days = day_set(days)?;
-        let ranges = if hours.eq_ignore_ascii_case("off") || hours.eq_ignore_ascii_case("closed") {
+        let ranges = if is_closed(hours) {
             Vec::new()
         } else {
             minute_ranges(hours)?

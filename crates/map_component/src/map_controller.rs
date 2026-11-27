@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -15,7 +15,9 @@ use crate::{
         renderer::TILE_SIZE,
         sprites::SpriteSheet,
         tiles::background_delay,
-        viewport::{Viewport, lonlat_to_center, max_zoom_ui, world_to_lonlat},
+        viewport::{
+            Viewport, lonlat_to_center, max_zoom_ui, nearest_copy, world_to_lonlat, wrap_center,
+        },
     },
 };
 
@@ -29,6 +31,15 @@ const FRAMED_TOLERANCE_PX: f32 = 32.0;
 /// How many zoom levels further out than a fit the view may be and still count as framing a box
 /// (one level: the box at least half the size the fit would draw it).
 const FRAMED_ZOOM_SLACK: f32 = 1.0;
+
+/// Cubic ease in and out over `t` in `0..=1`.
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
 
 /// A world-coordinate box (see `viewport::lonlat_to_world`), `((min_x, min_y), (max_x, max_y))`.
 pub type WorldBounds = ((f64, f64), (f64, f64));
@@ -84,6 +95,8 @@ pub struct MapController {
     pub platform: PlatformWindow,
     /// The camera glide under way, cancelled by the next one (see [`Self::glide_to`]).
     glide: Rc<RefCell<Option<TaskHandle>>>,
+    /// What the host's UI covers of the map (see [`Self::set_covered`]).
+    covered: Rc<Cell<Insets>>,
 }
 
 impl PartialEq for MapController {
@@ -102,6 +115,7 @@ impl PartialEq for MapController {
             && self.sprites == other.sprites
             && Rc::ptr_eq(&self.style, &other.style)
             && Rc::ptr_eq(&self.glide, &other.glide)
+            && Rc::ptr_eq(&self.covered, &other.covered)
     }
 }
 
@@ -126,6 +140,7 @@ impl MapController {
         let style = use_hook(|| Rc::new(RefCell::new(Arc::new(style::default::default_style()))));
         let platform = use_hook(|| Platform::get().current_window());
         let glide = use_hook(|| Rc::new(RefCell::new(None)));
+        let covered = use_hook(|| Rc::new(Cell::new(Insets::default())));
 
         Self {
             center,
@@ -143,6 +158,7 @@ impl MapController {
             style,
             platform,
             glide,
+            covered,
         }
     }
 }
@@ -198,6 +214,18 @@ impl MapController {
     pub fn clear_layers(&mut self) {
         self.layers.set(Vec::new());
         self.platform.send(UserEvent::RequestRedraw);
+    }
+
+    /// Records what the host's UI covers of the map (a drawer down one side, a bottom sheet), so
+    /// whatever frames something on the map can keep it in the part left visible. Not reactive:
+    /// read when framing, not drawn from.
+    pub fn set_covered(&self, covered: Insets) {
+        self.covered.set(covered);
+    }
+
+    /// What [`Self::set_covered`] last recorded.
+    pub fn covered(&self) -> Insets {
+        self.covered.get()
     }
 
     /// Moves and zooms the view so the world-coordinate box `bounds` fills the part of the map
@@ -298,7 +326,9 @@ impl MapController {
                 .pixels_to_center_delta(size.width as f64 / 2.0, size.height as f64 / 2.0)
                 .to_vector()
         };
-        let (from_middle, to_middle) = (from_center + half(from_zoom), center + half(zoom));
+        let from_middle = from_center + half(from_zoom);
+        // The short way round the sideways-repeating world.
+        let to_middle = nearest_copy(from_middle, center + half(zoom));
         let platform = self.platform.clone();
 
         // In the window's scope: a glide started from a list row's press handler would otherwise
@@ -312,25 +342,21 @@ impl MapController {
                     return;
                 }
                 let t = (start.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
-                // Ease in and out (cubic).
-                let eased = if t < 0.5 {
-                    4.0 * t * t * t
+                let done = t >= 1.0;
+                // The last frame lands exactly on the target, not on interpolation round-off.
+                let frame = if done {
+                    (center, zoom)
                 } else {
-                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                    let eased = ease_in_out(t);
+                    let frame_zoom = from_zoom + (zoom - from_zoom) * eased;
+                    let middle = from_middle + (to_middle - from_middle) * eased as f64;
+                    (wrap_center(middle - half(frame_zoom)), frame_zoom)
                 };
-                let frame_zoom = from_zoom + (zoom - from_zoom) * eased;
-                let middle = from_middle + (to_middle - from_middle) * eased as f64;
-                let frame_center = if t >= 1.0 {
-                    center
-                } else {
-                    middle - half(frame_zoom)
-                };
-                let frame_zoom = if t >= 1.0 { zoom } else { frame_zoom };
-                center_state.set(frame_center);
-                zoom_state.set(frame_zoom);
-                shown = (frame_center, frame_zoom);
+                center_state.set(frame.0);
+                zoom_state.set(frame.1);
+                shown = frame;
                 platform.send(UserEvent::RequestRedraw);
-                if t >= 1.0 {
+                if done {
                     return;
                 }
             }

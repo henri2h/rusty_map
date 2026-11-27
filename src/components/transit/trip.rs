@@ -3,22 +3,27 @@
 //!
 //! The timeline is a grid of rows — time | rail | text — where the rail runs down the line's
 //! colour while riding and dotted while walking, with a node at every place the trip stops at:
-//! its start, each stop it boards or leaves a vehicle at, its end. Each row is a `Content::fit`
-//! row so the rail column stretches to whatever height the text beside it takes.
+//! its start, each stop it boards or leaves a vehicle at, its end. Each row takes the height of
+//! its text; the rail column stretches to it (a `Content::fit` row, the rail itself absolutely
+//! placed so it doesn't count towards that height — see [`rail_stack`]).
 
 use std::{cmp::Reverse, collections::HashSet};
 
 use freya::{icons::lucide, prelude::*};
+use map_component::{OverlayPath, OverlayStop, RouteOverlay};
 
-use crate::mobile::{TOUCH, text_size};
+use crate::{
+    components::search::util::search::format_distance,
+    mobile::{TOUCH, tap_padding, text_size},
+};
 
 use super::{
     api::Mode,
     controller::{END_COLOR, START_COLOR, TransitController},
-    journey::{Itinerary, Leg},
+    journey::{Itinerary, Leg, LegPlace},
     ui::{
-        ACCENT, DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, duration_text,
-        icon, line_badge, rgb_or,
+        ACCENT, DIVIDER, LATE, LINK, LIVE, TEXT, TEXT_FAINT, TEXT_MUTED, clock_time, diff_key,
+        divider, duration_text, icon, line_badge, rgb_or,
     },
     when::When,
 };
@@ -30,6 +35,14 @@ const RAIL_COLUMN: f32 = 24.0;
 const RAIL_WIDTH: f32 = 4.0;
 /// From a node row's top to the middle of its first line of text, where its dot sits.
 const NODE_DOT_Y: f32 = 10.0;
+/// Dot sizes: the trip's ends, a stop it boards or leaves a vehicle at, a stop it rides past.
+const END_DOT: f32 = 16.0;
+const STOP_DOT: f32 = 14.0;
+const PASSED_DOT: f32 = 8.0;
+/// From a passed stop's row top to the middle of its name.
+const PASSED_DOT_Y: f32 = 11.0;
+/// Walking legs on the map.
+const WALK_COLOR: Color = Color::from_rgb(95, 99, 104);
 /// Light grey: walking rails, placeholders.
 const QUIET: Color = Color::from_rgb(200, 203, 208);
 const PLACEHOLDER: Color = Color::from_rgb(241, 243, 244);
@@ -105,39 +118,29 @@ pub fn itinerary_card(
     now: i64,
     mut on_press: impl FnMut() + 'static,
 ) -> Element {
-    let first_ride = itinerary.legs.iter().find(|leg| !leg.is_walk());
-    let departure: Element = match first_ride {
-        Some(ride) => rect()
-            .horizontal()
-            .cross_align(Alignment::Center)
-            .spacing(6.0)
-            .width(Size::fill())
-            .child(
-                label()
-                    .text(format!(
-                        "{} from {}",
-                        clock_time(ride.start),
-                        ride.from.name
-                    ))
-                    .font_size(text_size(12.0))
-                    .color(TEXT)
-                    .max_lines(1)
-                    .text_overflow(TextOverflow::Ellipsis),
-            )
-            .maybe_child(live_status(ride).map(|(text, color)| {
-                label()
-                    .text(text)
-                    .font_size(text_size(12.0))
-                    .color(color)
-                    .into_element()
-            }))
-            .into_element(),
-        None => label()
-            .text("Walk the whole way")
-            .font_size(text_size(12.0))
-            .color(TEXT)
-            .into_element(),
-    };
+    // Where and when the first vehicle leaves, its live status right after: one line, cut
+    // short (with an ellipsis) by a long stop name rather than overflowing the card.
+    let departure = match itinerary.legs.iter().find(|leg| !leg.is_walk()) {
+        Some(ride) => {
+            let line = paragraph().span(
+                Span::new(format!(
+                    "{} from {}",
+                    clock_time(ride.start),
+                    ride.from.name
+                ))
+                .color(TEXT),
+            );
+            match live_status(ride) {
+                Some((status, color)) => line.span(Span::new(format!("  {status}")).color(color)),
+                None => line,
+            }
+        }
+        None => paragraph().span(Span::new("Walk the whole way").color(TEXT)),
+    }
+    .width(Size::fill())
+    .font_size(text_size(12.0))
+    .max_lines(1)
+    .text_overflow(TextOverflow::Ellipsis);
 
     rect()
         .vertical()
@@ -268,7 +271,7 @@ fn costs(itinerary: &Itinerary, now: i64) -> Vec<String> {
 
 /// The legs at a glance — line badges, walks as a footprint and their minutes — wrapping onto
 /// another line rather than being cut off.
-pub fn leg_strip(itinerary: &Itinerary) -> Element {
+fn leg_strip(itinerary: &Itinerary) -> Element {
     // One height for every chip, so wrapped lines and mixed chips line up.
     let chip_height = if TOUCH { 26.0 } else { 22.0 };
     let cell = |child: Element| {
@@ -315,8 +318,12 @@ pub fn leg_strip(itinerary: &Itinerary) -> Element {
         .into_element()
 }
 
-/// `"on time"` / `"+3 min"` for a ride with live data, `"Cancelled"` for a cancelled departure.
+/// `"on time"` / `"+3 min"` for a ride with live data, `"Cancelled"` for a cancelled departure;
+/// nothing for a walk.
 fn live_status(ride: &Leg) -> Option<(String, Color)> {
+    if ride.is_walk() {
+        return None;
+    }
     if ride.from.cancelled {
         return Some(("Cancelled".to_string(), LATE));
     }
@@ -325,6 +332,53 @@ fn live_status(ride: &Leg) -> Option<(String, Color)> {
         (true, _) => Some(("on time".to_string(), LIVE)),
         _ => None,
     }
+}
+
+// ─── On the map ───────────────────────────────────────────────────────────────
+
+/// The journey drawn on the map: vehicles in their line colour, walks dotted, stops as dots.
+pub fn journey_overlay(itinerary: &Itinerary) -> RouteOverlay {
+    let mut overlay = RouteOverlay::default();
+    for leg in &itinerary.legs {
+        let color = if leg.is_walk() {
+            WALK_COLOR
+        } else {
+            rgb_or(leg.color, ACCENT)
+        };
+        let path = if leg.geometry.len() >= 2 {
+            leg.geometry.clone()
+        } else {
+            vec![(leg.from.lon, leg.from.lat), (leg.to.lon, leg.to.lat)]
+        };
+        overlay.paths.push(OverlayPath::from_lonlat(
+            &path,
+            color,
+            if leg.is_walk() { 4.0 } else { 6.0 },
+            leg.is_walk(),
+        ));
+        if !leg.is_walk() {
+            for stop in [&leg.from, &leg.to] {
+                overlay
+                    .stops
+                    .push(OverlayStop::from_lonlat(stop.lon, stop.lat, color, false));
+            }
+        }
+    }
+    if let (Some(first), Some(last)) = (itinerary.legs.first(), itinerary.legs.last()) {
+        overlay.stops.push(OverlayStop::from_lonlat(
+            first.from.lon,
+            first.from.lat,
+            START_COLOR,
+            true,
+        ));
+        overlay.stops.push(OverlayStop::from_lonlat(
+            last.to.lon,
+            last.to.lat,
+            END_COLOR,
+            true,
+        ));
+    }
+    overlay
 }
 
 // ─── Step-by-step timeline ────────────────────────────────────────────────────
@@ -413,10 +467,8 @@ impl Component for TripDetail {
             .child(header)
             .child(
                 rect()
-                    .height(Size::px(1.0))
-                    .width(Size::fill())
-                    .background(DIVIDER)
-                    .margin((0.0f32, 0.0f32, 14.0f32, 0.0f32)),
+                    .margin((0.0f32, 0.0f32, 14.0f32, 0.0f32))
+                    .child(divider()),
             )
             .children(timeline(
                 itinerary,
@@ -427,12 +479,15 @@ impl Component for TripDetail {
             .child(rect().height(Size::px(16.0)))
     }
 
+    /// Another itinerary starts afresh (its stops folded).
     fn render_key(&self) -> DiffKey {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::new();
-        ("trip", self.itinerary.start, self.itinerary.end).hash(&mut hasher);
-        self.itinerary.legs.len().hash(&mut hasher);
-        DiffKey::U64(hasher.finish())
+        let legs: Vec<(i64, &str)> = self
+            .itinerary
+            .legs
+            .iter()
+            .map(|leg| (leg.start, leg.line.as_str()))
+            .collect();
+        diff_key(("trip", self.itinerary.end, legs))
     }
 }
 
@@ -475,7 +530,8 @@ fn timeline(
         return Vec::new();
     };
     let mut rows = vec![node_row(
-        NodeTime::new(first.start, live_status_if_ride(first)),
+        first.start,
+        live_status(first),
         origin,
         Rail::None,
         Rail::of(first),
@@ -491,17 +547,16 @@ fn timeline(
             // Where this leg ends and the next starts: boarding (its departure time and live
             // status) if the next one rides, else getting off (this one's arrival).
             Some(next) => {
-                let time = if next.is_walk() {
-                    NodeTime::new(leg.end, None)
-                } else {
-                    NodeTime::new(next.start, live_status(next))
-                };
-                let ride_color = [next, leg].into_iter().find_map(|leg| match Rail::of(leg) {
-                    Rail::Ride(color) => Some(color),
-                    _ => None,
-                });
+                let time = if next.is_walk() { leg.end } else { next.start };
+                let ride_color = [next, leg]
+                    .into_iter()
+                    .find_map(|side| match Rail::of(side) {
+                        Rail::Ride(color) => Some(color),
+                        _ => None,
+                    });
                 rows.push(node_row(
                     time,
+                    live_status(next),
                     if next.from.name.is_empty() {
                         &leg.to.name
                     } else {
@@ -513,7 +568,8 @@ fn timeline(
                 ));
             }
             None => rows.push(node_row(
-                NodeTime::new(leg.end, None),
+                leg.end,
+                None,
                 destination,
                 Rail::of(leg),
                 Rail::None,
@@ -522,22 +578,6 @@ fn timeline(
         }
     }
     rows
-}
-
-fn live_status_if_ride(leg: &Leg) -> Option<(String, Color)> {
-    (!leg.is_walk()).then(|| live_status(leg)).flatten()
-}
-
-/// A node's time column: the clock time, and under it the live status of what leaves there.
-struct NodeTime {
-    time: i64,
-    status: Option<(String, Color)>,
-}
-
-impl NodeTime {
-    fn new(time: i64, status: Option<(String, Color)>) -> Self {
-        Self { time, status }
-    }
 }
 
 /// A row of the timeline: `time` right-aligned in its column, `rail` stretched to the row's
@@ -636,11 +676,18 @@ fn rail_dot(center_y: f32, size: f32, fill: Color, ring: Color, ring_width: f32)
 }
 
 /// A place the trip stops at: its dot over the rail (`above` leading in, `below` leading out),
-/// the time, and the place's name.
-fn node_row(time: NodeTime, name: &str, above: Rail, below: Rail, dot: Dot) -> Element {
+/// the time and under it the live `status` of what leaves there, and the place's name.
+fn node_row(
+    time: i64,
+    status: Option<(String, Color)>,
+    name: &str,
+    above: Rail,
+    below: Rail,
+    dot: Dot,
+) -> Element {
     let size = match dot {
-        Dot::Start | Dot::End => 16.0,
-        Dot::Stop(_) => 14.0,
+        Dot::Start | Dot::End => END_DOT,
+        Dot::Stop(_) => STOP_DOT,
     };
     let (fill, ring) = match dot {
         Dot::Start => (Color::WHITE, START_COLOR),
@@ -661,12 +708,12 @@ fn node_row(time: NodeTime, name: &str, above: Rail, below: Rail, dot: Dot) -> E
         .padding((1.0f32, 0.0f32, 0.0f32, 0.0f32))
         .child(
             label()
-                .text(clock_time(time.time))
+                .text(clock_time(time))
                 .font_size(text_size(13.0))
                 .font_weight(FontWeight::BOLD)
                 .color(TEXT),
         )
-        .maybe_child(time.status.map(|(text, color)| {
+        .maybe_child(status.map(|(text, color)| {
             label()
                 .text(text)
                 .font_size(text_size(11.0))
@@ -694,13 +741,7 @@ fn walk_row(leg: &Leg) -> Element {
     let distance = leg
         .distance_m
         .filter(|meters| *meters >= 1.0)
-        .map(|meters| {
-            if meters < 1_000.0 {
-                format!(" · {} m", (meters / 10.0).round() as i64 * 10)
-            } else {
-                format!(" · {:.1} km", meters / 1_000.0)
-            }
-        })
+        .map(|meters| format!(" · {}", format_distance(meters)))
         .unwrap_or_default();
     timeline_row(
         None,
@@ -748,7 +789,7 @@ fn ride_rows(index: usize, leg: &Leg, mut expanded: State<HashSet<usize>>) -> Ve
         .horizontal()
         .cross_align(Alignment::Center)
         .spacing(4.0)
-        .padding((tap_slack(), 0.0f32))
+        .padding((tap_padding(2.0), 0.0f32))
         .cursor(CursorIcon::Pointer)
         .on_press(move |_: Event<PressEventData>| {
             let mut set = expanded.write();
@@ -834,10 +875,10 @@ fn ride_rows(index: usize, leg: &Leg, mut expanded: State<HashSet<usize>>) -> Ve
 }
 
 /// A stop a ride passes without the trip getting off: a small dot, its name and time.
-fn passed_stop_row(stop: &super::journey::LegPlace, color: Color) -> Element {
+fn passed_stop_row(stop: &LegPlace, color: Color) -> Element {
     let rail = rail_stack(
         vec![rail_segment(Rail::Ride(color), Size::fill())],
-        Some(rail_dot(11.0, 8.0, Color::WHITE, color, 2.0)),
+        Some(rail_dot(PASSED_DOT_Y, PASSED_DOT, Color::WHITE, color, 2.0)),
     );
     let time = if stop.cancelled {
         label()
@@ -868,9 +909,4 @@ fn passed_stop_row(stop: &super::journey::LegPlace, color: Color) -> Element {
             .text_overflow(TextOverflow::Ellipsis)
             .into_element(),
     )
-}
-
-/// Extra vertical padding around a tap target on touch screens.
-fn tap_slack() -> f32 {
-    if TOUCH { 6.0 } else { 2.0 }
 }

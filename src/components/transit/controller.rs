@@ -199,8 +199,7 @@ impl TransitController {
         self.close_view();
         self.to.set(to);
         self.planner_open.set(true);
-        self.close_trip();
-        self.show_endpoints();
+        self.endpoints_changed();
         // The start is still unknown: invite picking it right away.
         self.start_picking(Field::From);
     }
@@ -222,10 +221,9 @@ impl TransitController {
     pub fn close_planner(&mut self) {
         self.stop_picking();
         self.planner_open.set(false);
-        self.close_trip();
         self.from.set(None);
         self.to.set(None);
-        self.show_endpoints();
+        self.endpoints_changed();
         self.map.set_route_overlay(None);
     }
 
@@ -238,8 +236,7 @@ impl TransitController {
             Field::From => self.from.set(Some(endpoint)),
             Field::To => self.to.set(Some(endpoint)),
         }
-        self.close_trip();
-        self.show_endpoints();
+        self.endpoints_changed();
         let other_empty = match field {
             Field::From => self.to.peek().is_none(),
             Field::To => self.from.peek().is_none(),
@@ -259,8 +256,22 @@ impl TransitController {
         let to = self.to.peek().clone();
         self.from.set(to);
         self.to.set(from);
-        self.close_trip();
-        self.show_endpoints();
+        self.endpoints_changed();
+    }
+
+    /// One step back through what transit shows: a view, else an itinerary's steps (to the
+    /// list), else the planner. `false` when none was open, for the caller to go back further.
+    pub fn back(&mut self) -> bool {
+        if self.view.peek().is_some() {
+            self.close_view();
+        } else if *self.trip_open.peek() {
+            self.close_trip();
+        } else if *self.planner_open.peek() {
+            self.close_planner();
+        } else {
+            return false;
+        }
+        true
     }
 
     /// Back from the selected itinerary's steps to the planner and its list.
@@ -285,7 +296,8 @@ impl TransitController {
             let Ok(Some(address)) = search::reverse_address(lat, lon).await else {
                 return;
             };
-            // Renamed only if still that point: it may have been replaced meanwhile.
+            // Renamed only if still that point: it may have been replaced meanwhile. Set
+            // directly, not through `set_endpoint`: the same place, nothing else to update.
             for endpoint in [&mut from, &mut to] {
                 let unchanged = endpoint
                     .peek()
@@ -300,6 +312,13 @@ impl TransitController {
                 }
             }
         });
+    }
+
+    /// After the start or destination changed: what was shown for the old journey goes (its
+    /// steps), and the new ends are marked on the map.
+    fn endpoints_changed(&mut self) {
+        self.close_trip();
+        self.show_endpoints();
     }
 
     /// Marks the planner's start and destination on the map, so a point picked on it shows

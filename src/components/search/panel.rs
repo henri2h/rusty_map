@@ -271,57 +271,16 @@ impl Component for SearchPanel {
         let input_id = use_a11y();
         let input_focus = use_focus(input_id);
         let screen = use_screen();
-        let screen_memo = use_consume::<Memo<Screen>>();
         // The search sheet's pull-to-close; the drawer sheet has detents (`sheet_state`).
         let pull = use_sheet_pull();
-        let mut sheet_state = use_sheet_state();
+        let sheet_state = use_sheet_state(map.viewport_size);
         let sheet_offset = sheet_state.use_offset();
         // The sheet's scrolled content, so a pull anywhere on it doesn't fight its scrolling.
         let sheet_scroll = use_sheet_scroll();
         use_provide_context(move || sheet_scroll);
-        // Each time the drawer opens, the sheet starts at half height.
-        use_side_effect({
-            let (selected, view, planner_open) =
-                (places.selected_place, transit.view, transit.planner_open);
-            move || {
-                let open =
-                    selected.read().is_some() || view.read().is_some() || *planner_open.read();
-                if !open {
-                    sheet_state.reset();
-                }
-            }
-        });
-        // Picking a point on the map (phone): the sheet makes way for the map, down to its
-        // header, then comes back up — to the trips once both ends are set, else full height
-        // for typing an address.
-        let mut was_picking = use_state(|| false);
-        use_side_effect({
-            let (picking, planner_open) = (transit.picking, transit.planner_open);
-            let (from, to) = (transit.from, transit.to);
-            let map = map.clone();
-            move || {
-                let picking = *picking.read() && *planner_open.read();
-                if picking == *was_picking.peek() {
-                    return;
-                }
-                was_picking.set(picking);
-                let screen = *screen_memo.peek();
-                if !screen.compact {
-                    return;
-                }
-                let window_height = map.viewport_size.peek().size.height;
-                let detent = if picking {
-                    Detent::Collapsed
-                } else if !*planner_open.peek() {
-                    return;
-                } else if from.peek().is_some() && to.peek().is_some() {
-                    Detent::Half
-                } else {
-                    Detent::Full
-                };
-                sheet_state.set_detent(detent, screen, window_height);
-            }
-        });
+        use_sheet_reopens_at_half(sheet_state, places, transit);
+        use_sheet_follows_picking(sheet_state, transit);
+        use_route_refit_on_settle(sheet_state, transit);
 
         // The listed results, pinned on the map (tapping one picks it, see `HomePage`).
         use_side_effect({
@@ -340,30 +299,6 @@ impl Component for SearchPanel {
                     selected: None,
                     glyph: MarkerGlyph::Dot,
                 }));
-            }
-        });
-
-        // The sheet coming to rest at another height (phone) re-frames a drawn route (a trip,
-        // a line) in the map it now leaves: collapsed, the trip fills it; back up, none of it
-        // hides under the sheet.
-        let mut framed_for = use_state(|| Detent::Half);
-        use_side_effect({
-            let mut map = map.clone();
-            let (planner_open, view) = (transit.planner_open, transit.view);
-            move || {
-                let detent = sheet_state.detent();
-                if detent == *framed_for.peek() {
-                    return;
-                }
-                framed_for.set(detent);
-                let screen = *screen_memo.peek();
-                let showing_route = *planner_open.peek() || view.peek().is_some();
-                // Full height leaves no map to frame anything in.
-                if !screen.compact || !showing_route || detent == Detent::Full {
-                    return;
-                }
-                let window_height = map.viewport_size.peek().size.height;
-                refit_route(&mut map, detent.height(screen, window_height));
             }
         });
 
@@ -588,13 +523,7 @@ impl Component for SearchPanel {
                 if *transit.picking.peek() && *transit.planner_open.peek() {
                     return;
                 }
-                if transit.view.peek().is_some() {
-                    transit.close_view();
-                } else if *transit.trip_open.peek() {
-                    transit.close_trip();
-                } else if *transit.planner_open.peek() {
-                    transit.close_planner();
-                } else {
+                if !transit.back() {
                     search.reset(String::new());
                     places.clear();
                     input_id.request_unfocus();
@@ -602,23 +531,34 @@ impl Component for SearchPanel {
             }
         };
 
-        let window_height = map.viewport_size.read().size.height;
+        // Sheet heights follow the window's: re-rendered when it's resized.
+        map.viewport_size.read();
+        // Typing takes the full height: at half height the keyboard hid the results. Once a
+        // search runs (Enter, a chip) the box lets go of the keyboard and the sheet drops back
+        // to half height, uncovering the results' pins on the map above it.
+        let sheet_detent = match (searching, input_focus().is_focused()) {
+            (true, true) => Detent::Full,
+            (true, false) => Detent::Half,
+            (false, _) => sheet_state.detent(),
+        };
+        // What covers the map, for framing things on it (see `MapController::covered`).
+        map.set_covered(if sheet {
+            Insets {
+                bottom: sheet_state.cover(sheet_detent),
+                ..Insets::default()
+            }
+        } else if drawer_open && !screen.compact {
+            Insets {
+                left: PANEL_WIDTH,
+                ..Insets::default()
+            }
+        } else {
+            Insets::default()
+        });
         let panel = if searching {
-            // Typing takes the full height: at half height the keyboard hid the results. Once a
-            // search runs (Enter, a chip) the box lets go of the keyboard and the sheet drops
-            // back to half height, uncovering the results' pins on the map above it.
-            let detent = if input_focus().is_focused() {
-                Detent::Full
-            } else {
-                Detent::Half
-            };
-            let height = detent.height(screen, window_height);
-            sheet_state.publish_cover(height, screen, window_height);
-            bottom_sheet(screen, height, pull.offset())
+            bottom_sheet(screen, sheet_state.height(sheet_detent), pull.offset())
         } else if sheet {
-            let height = sheet_state.detent().height(screen, window_height);
-            sheet_state.publish_cover(height, screen, window_height);
-            bottom_sheet(screen, height, sheet_offset)
+            bottom_sheet(screen, sheet_state.height(sheet_detent), sheet_offset)
         } else if screen.compact {
             rect()
                 .position(Position::new_absolute().top(0.0f32).left(0.0f32))
@@ -645,9 +585,6 @@ impl Component for SearchPanel {
                     (8.0, 8.0, 8.0, 8.0)
                 })
         };
-        if !sheet {
-            sheet_state.publish_cover(0.0, screen, window_height);
-        }
         // What pulling the sheet down (or tapping the search sheet's bar) does: end the search;
         // else (a pull down from the collapsed drawer) close what it shows, as back does.
         let close_sheet = {
@@ -658,13 +595,7 @@ impl Component for SearchPanel {
                 if searching {
                     search.reset(String::new());
                     input_id.request_unfocus();
-                } else if transit.view.peek().is_some() {
-                    transit.close_view();
-                } else if *transit.trip_open.peek() {
-                    transit.close_trip();
-                } else if *transit.planner_open.peek() {
-                    transit.close_planner();
-                } else {
+                } else if !transit.back() {
                     search.reset(String::new());
                     places.clear();
                 }
@@ -673,7 +604,7 @@ impl Component for SearchPanel {
         let handle = if searching {
             sheet_handle(pull, close_sheet.clone())
         } else if sheet {
-            drawer_handle(sheet_state, screen, window_height)
+            sheet_state.grab_bar(DIVIDER)
         } else {
             // Keeps the children's positions, and so the input and its focus, when the pill
             // turns into the sheet.
@@ -696,12 +627,8 @@ impl Component for SearchPanel {
         } else if sheet {
             panel
                 .on_pointer_down(sheet_state.on_sheet_grab(sheet_scroll))
-                .on_global_pointer_move(sheet_state.on_move(screen, window_height))
-                .on_capture_global_pointer_up(sheet_state.on_release(
-                    screen,
-                    window_height,
-                    on_close,
-                ))
+                .on_global_pointer_move(sheet_state.on_move())
+                .on_capture_global_pointer_up(sheet_state.on_release(on_close))
         } else {
             panel
         };
@@ -733,6 +660,79 @@ impl Component for SearchPanel {
             .child(handle)
             .children(content)
     }
+}
+
+/// Each time the drawer opens, its sheet starts at half height.
+fn use_sheet_reopens_at_half(
+    mut sheet: SheetState,
+    places: &PlaceController,
+    transit: &TransitController,
+) {
+    let (selected, view, planner_open) =
+        (places.selected_place, transit.view, transit.planner_open);
+    use_side_effect(move || {
+        let open = selected.read().is_some() || view.read().is_some() || *planner_open.read();
+        if !open {
+            sheet.reset();
+        }
+    });
+}
+
+/// Picking a point on the map (phone): the sheet makes way for the map, down to its header,
+/// then comes back up — to the trips once both ends are set, else full height for typing an
+/// address.
+fn use_sheet_follows_picking(mut sheet: SheetState, transit: &TransitController) {
+    let screen = use_consume::<Memo<Screen>>();
+    let mut was_picking = use_state(|| false);
+    let (picking, planner_open) = (transit.picking, transit.planner_open);
+    let (from, to) = (transit.from, transit.to);
+    use_side_effect(move || {
+        let picking = *picking.read() && *planner_open.read();
+        if picking == *was_picking.peek() {
+            return;
+        }
+        was_picking.set(picking);
+        if !screen.peek().compact {
+            return;
+        }
+        let detent = if picking {
+            Detent::Collapsed
+        } else if !*planner_open.peek() {
+            return;
+        } else if from.peek().is_some() && to.peek().is_some() {
+            Detent::Half
+        } else {
+            Detent::Full
+        };
+        sheet.set_detent(detent);
+    });
+}
+
+/// The sheet coming to rest at another height (phone) re-frames a drawn route (a trip, a line)
+/// in the map it now leaves: collapsed, the trip fills it; back up, none of it hides under the
+/// sheet. Not at full height, which leaves no map to frame it in.
+fn use_route_refit_on_settle(sheet: SheetState, transit: &TransitController) {
+    let screen = use_consume::<Memo<Screen>>();
+    let mut framed_for = use_state(|| Detent::Half);
+    let (planner_open, view) = (transit.planner_open, transit.view);
+    let mut map = transit.map.clone();
+    use_side_effect(move || {
+        let detent = sheet.detent();
+        if detent == *framed_for.peek() {
+            return;
+        }
+        framed_for.set(detent);
+        let showing_route = *planner_open.peek() || view.peek().is_some();
+        if !screen.peek().compact || !showing_route || detent == Detent::Full {
+            return;
+        }
+        // Recorded here too: the panel's own render, which records it, may come after.
+        map.set_covered(Insets {
+            bottom: sheet.cover(detent),
+            ..Insets::default()
+        });
+        refit_route(&mut map);
+    });
 }
 
 /// Compact layout's drawer and search: a sheet along the bottom edge, `height` tall, drawn
@@ -769,33 +769,6 @@ fn sheet_handle(pull: SheetPull, mut on_press: impl FnMut() + 'static) -> Elemen
             haptic(Haptic::Press);
             on_press();
         })
-        .into_element()
-}
-
-/// The drawer sheet's grab bar: dragging it moves the sheet between its detents (see
-/// [`SheetState`]); a tap raises it a step, or lowers it from full height.
-fn drawer_handle(state: SheetState, screen: Screen, window_height: f32) -> Element {
-    let mut on_press = state;
-    rect()
-        .width(Size::fill())
-        .padding((12.0f32, 0.0f32))
-        .center()
-        .cursor(CursorIcon::Pointer)
-        .on_pointer_down(state.on_grab())
-        .on_press(move |_: Event<PressEventData>| {
-            if !on_press.moved() {
-                haptic(Haptic::Press);
-                let detent = on_press.peek_detent().tapped();
-                on_press.set_detent(detent, screen, window_height);
-            }
-        })
-        .child(
-            rect()
-                .width(Size::px(36.))
-                .height(Size::px(4.))
-                .corner_radius(2.)
-                .background(DIVIDER),
-        )
         .into_element()
 }
 

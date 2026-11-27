@@ -2,18 +2,12 @@
 //! tapping the map — then Transitous itineraries, the selected one detailed leg by leg and
 //! drawn on the map.
 
-use std::{
-    hash::{Hash, Hasher},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use freya::{icons::lucide, prelude::*};
 
 use crate::mobile::{Haptic, TOUCH, haptic, tap_padding, text_size, use_screen};
-use map_component::{
-    OverlayPath, OverlayStop, RouteOverlay,
-    util::{tiles::background_delay, viewport::center_to_lonlat},
-};
+use map_component::util::{tiles::background_delay, viewport::center_to_lonlat};
 
 use crate::components::{
     favorites::Favorites,
@@ -28,24 +22,17 @@ use super::{
     api,
     controller::{END_COLOR, Endpoint, Field, START_COLOR, TransitController, TravelMode},
     journey::{self, Itinerary},
-    trip::{self, TripDetail},
+    trip::{self, TripDetail, journey_overlay},
     ui::{
-        ACCENT, DIVIDER, LINK, TEXT, TEXT_FAINT, TEXT_MUTED, icon, rgb_or, show_on_map, status_line,
+        ACCENT, DIVIDER, LINK, TEXT, TEXT_FAINT, TEXT_MUTED, diff_key, icon, show_on_map,
+        status_line,
     },
     when::{When, WhenPicker},
 };
 
-const WALK_COLOR: Color = Color::from_rgb(95, 99, 104);
-
 /// Same debounce/minimum as the main search box.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(400);
 const MIN_QUERY_LEN: usize = 2;
-
-fn hash_key(parts: impl Hash) -> DiffKey {
-    let mut hasher = std::hash::DefaultHasher::new();
-    parts.hash(&mut hasher);
-    DiffKey::U64(hasher.finish())
-}
 
 fn endpoint_key(endpoint: &Option<Endpoint>) -> Option<(String, i64, i64)> {
     endpoint.as_ref().map(|endpoint| {
@@ -470,7 +457,7 @@ impl Component for EndpointField {
     }
 
     fn render_key(&self) -> DiffKey {
-        hash_key((self.field == Field::From, endpoint_key(&self.endpoint)))
+        diff_key((self.field == Field::From, endpoint_key(&self.endpoint)))
     }
 }
 
@@ -495,8 +482,7 @@ impl Component for Itineraries {
         // The sheet's scroll position, for its pull-to-close (see `SheetScroll`).
         let scroll = use_consume::<SheetScroll>();
         // Below full height on a phone, dragging the list moves the sheet instead.
-        let screen = use_screen();
-        let compact = screen.compact;
+        let compact = use_screen().compact;
         let sheet = use_try_consume::<SheetState>();
         let content_scrolls = !compact || sheet.is_none_or(|sheet| sheet.content_scrolls());
         let transit = use_consume::<TransitController>();
@@ -569,7 +555,7 @@ impl Component for Itineraries {
                     .zip(tags)
                     .enumerate()
                     .map(|(index, (itinerary, tag))| {
-                        let for_map = itinerary.clone();
+                        let overlay = journey_overlay(itinerary);
                         let mut selected = selected;
                         let mut transit = transit.clone();
                         let sheet = sheet.filter(|_| compact);
@@ -581,10 +567,9 @@ impl Component for Itineraries {
                             if let Some(mut sheet) = sheet
                                 && sheet.peek_detent() == Detent::Full
                             {
-                                let window_height = transit.map.viewport_size.peek().size.height;
-                                sheet.set_detent(Detent::Half, screen, window_height);
+                                sheet.set_detent(Detent::Half);
                             }
-                            show_on_map(&mut transit.map, journey_overlay(&for_map));
+                            show_on_map(&mut transit.map, overlay.clone());
                         })
                     })
                     .collect()
@@ -617,56 +602,11 @@ impl Component for Itineraries {
     fn render_key(&self) -> DiffKey {
         let position =
             |endpoint: &Endpoint| ((endpoint.lat * 1e6) as i64, (endpoint.lon * 1e6) as i64);
-        hash_key((
+        diff_key((
             "itineraries",
             position(&self.from),
             position(&self.to),
             self.when,
         ))
     }
-}
-
-/// The journey drawn on the map: vehicles in their line colour, walks dotted, stops as dots.
-fn journey_overlay(itinerary: &Itinerary) -> RouteOverlay {
-    let mut overlay = RouteOverlay::default();
-    for leg in &itinerary.legs {
-        let color = if leg.is_walk() {
-            WALK_COLOR
-        } else {
-            rgb_or(leg.color, ACCENT)
-        };
-        let path = if leg.geometry.len() >= 2 {
-            leg.geometry.clone()
-        } else {
-            vec![(leg.from.lon, leg.from.lat), (leg.to.lon, leg.to.lat)]
-        };
-        overlay.paths.push(OverlayPath::from_lonlat(
-            &path,
-            color,
-            if leg.is_walk() { 4.0 } else { 6.0 },
-            leg.is_walk(),
-        ));
-        if !leg.is_walk() {
-            for stop in [&leg.from, &leg.to] {
-                overlay
-                    .stops
-                    .push(OverlayStop::from_lonlat(stop.lon, stop.lat, color, false));
-            }
-        }
-    }
-    if let (Some(first), Some(last)) = (itinerary.legs.first(), itinerary.legs.last()) {
-        overlay.stops.push(OverlayStop::from_lonlat(
-            first.from.lon,
-            first.from.lat,
-            START_COLOR,
-            true,
-        ));
-        overlay.stops.push(OverlayStop::from_lonlat(
-            last.to.lon,
-            last.to.lat,
-            END_COLOR,
-            true,
-        ));
-    }
-    overlay
 }

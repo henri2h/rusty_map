@@ -76,6 +76,16 @@ pub fn wrap_center(center: CursorPoint) -> CursorPoint {
     )
 }
 
+/// `to` (a `center`-space point) moved by whole worlds to the copy nearest `from`, so moving from
+/// one to the other takes the short way — across the antimeridian rather than around the globe.
+pub fn nearest_copy(from: CursorPoint, to: CursorPoint) -> CursorPoint {
+    let half = WORLD_CENTER_UNITS / 2.0;
+    CursorPoint::new(
+        from.x + (to.x - from.x + half).rem_euclid(WORLD_CENTER_UNITS) - half,
+        to.y,
+    )
+}
+
 /// Inverse of [`lonlat_to_center`] — the current view's rough center as lon/lat, used to bias
 /// search results toward what's currently on screen.
 pub fn center_to_lonlat(center: CursorPoint) -> (f64, f64) {
@@ -163,7 +173,7 @@ impl Viewport {
 
     /// `world_x` moved by whole worlds onto the copy nearest the view (from a quarter world left
     /// of its left edge), so a marker or route past the antimeridian is drawn where it's seen.
-    pub fn view_world_x(&self, world_x: f64) -> f64 {
+    fn view_world_x(&self, world_x: f64) -> f64 {
         let left = self.center_real_x / 2f64.powi(self.zoom_z as i32);
         left - 0.25 + (world_x - left + 0.25).rem_euclid(1.0)
     }
@@ -211,7 +221,7 @@ impl Viewport {
     /// [`Self::world_to_screen`] without picking a world copy: for the points of one line or
     /// shape, moved together (by their first point's [`Self::view_world_x`] shift) so it isn't
     /// torn apart where points land on different copies.
-    pub fn world_to_screen_exact(&self, world_x: f64, world_y: f64) -> (f32, f32) {
+    fn world_to_screen_exact(&self, world_x: f64, world_y: f64) -> (f32, f32) {
         let scale = 2f64.powi(self.zoom_z as i32);
         (
             ((world_x * scale - self.center_real_x) * self.tile_px as f64) as f32,
@@ -235,7 +245,6 @@ impl Viewport {
         mouse: CursorPoint,
         max_real_zoom: u32,
     ) -> CursorPoint {
-        let center = wrap_center(center);
         let old_viewport = Viewport::new(center, old_zoom, max_real_zoom);
 
         // Real tile-space point (at the *old* zoom level) currently under the mouse.

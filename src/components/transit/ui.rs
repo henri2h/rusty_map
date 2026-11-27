@@ -1,7 +1,7 @@
 //! Building blocks shared by the transit drawer views: line badges, icons, status lines and
 //! French clock times.
 
-use crate::mobile::{SHEET_PERCENT, TOUCH, is_compact, text_size};
+use crate::mobile::{TOUCH, is_compact, text_size};
 use bytes::Bytes;
 use freya::{icons::lucide, prelude::*};
 
@@ -144,64 +144,67 @@ pub fn year_of(days: i64) -> i64 {
     year
 }
 
-/// Kept clear when framing a trip: the drawer on the map's left, and on its right the column of
-/// map controls (Layers, Favorites, Settings: 12 px from the edge, ~100 px wide) — a route end
-/// in the top-right corner hid under them.
-pub const DRAWER_INSETS: Insets = Insets {
-    top: 24.0,
-    right: 128.0,
-    bottom: 24.0,
-    left: 384.0,
-};
-
-/// Draws `overlay` on the map and frames it beside the drawer — above the bottom sheet, in the
-/// compact layout. A view already showing it (another itinerary of the same journey, say) stays
-/// put; otherwise the map glides there (see `MapController::frame_world_bounds`).
+/// Draws `overlay` on the map and frames it in the part the drawer or bottom sheet leaves
+/// visible (see [`route_insets`]). A view already showing it (another itinerary of the same
+/// journey, say) stays put; otherwise the map glides there (see
+/// `MapController::frame_world_bounds`).
 pub fn show_on_map(map: &mut MapController, overlay: RouteOverlay) {
     if let Some(bounds) = overlay.world_bounds() {
-        let area = map.viewport_size.peek().size;
-        // The sheet as it rests now: collapsed, more of the map shows the route.
-        let covered = match crate::components::sheet::covered_bottom() {
-            0.0 => area.height * SHEET_PERCENT / 100.0,
-            covered => covered,
-        };
-        map.frame_world_bounds(bounds, route_insets(area.width, covered), ROUTE_MAX_ZOOM);
+        map.frame_world_bounds(bounds, route_insets(map), ROUTE_MAX_ZOOM);
     }
     map.set_route_overlay(Some(overlay));
 }
 
-/// Re-frames the route already drawn for a bottom sheet now covering `covered` logical pixels of
-/// the map (phone): collapsed, the trip fills the map it uncovers; back up, none of it hides
-/// under the sheet. Nothing without a route. Always re-fitted, gliding: the sheet moved to change
-/// how much map there is.
-pub fn refit_route(map: &mut MapController, covered: f32) {
+/// Re-frames the route already drawn, after what covers the map changed (the bottom sheet came
+/// to rest at another height): always, gliding — the point is to use the map just uncovered.
+/// Nothing without a route.
+pub fn refit_route(map: &mut MapController) {
     let bounds = map
         .route_overlay
         .peek()
         .as_ref()
         .and_then(|overlay| overlay.world_bounds());
     if let Some(bounds) = bounds {
-        let width = map.viewport_size.peek().size.width;
-        map.glide_to_world_bounds(bounds, route_insets(width, covered), ROUTE_MAX_ZOOM);
+        map.glide_to_world_bounds(bounds, route_insets(map), ROUTE_MAX_ZOOM);
     }
 }
 
 /// Closest a framed route is shown.
 const ROUTE_MAX_ZOOM: f32 = 16.5;
+/// Clear space around a framed route.
+const ROUTE_MARGIN: f32 = 24.0;
 
-/// The part of a `width` wide map a route is framed in: beside the drawer, or above a bottom
-/// sheet covering `covered` (compact layout).
-fn route_insets(width: f32, covered: f32) -> Insets {
-    if is_compact(width) {
+/// Where a route is framed: what the host's UI covers of the map (`MapController::covered`)
+/// plus a margin, and the map controls — under the search box on a phone (the top), and down
+/// the right edge on desktop (Layers, Favorites, Settings: 12 px from it, ~100 px wide), where a
+/// route end in the corner hid under them.
+fn route_insets(map: &MapController) -> Insets {
+    let covered = map.covered();
+    let controls = if is_compact(map.viewport_size.peek().size.width) {
         Insets {
             top: 72.0,
-            right: 24.0,
-            bottom: covered + 24.0,
-            left: 24.0,
+            ..Insets::default()
         }
     } else {
-        DRAWER_INSETS
+        Insets {
+            right: 128.0,
+            ..Insets::default()
+        }
+    };
+    Insets {
+        top: covered.top + controls.top.max(ROUTE_MARGIN),
+        right: covered.right + controls.right.max(ROUTE_MARGIN),
+        bottom: covered.bottom + controls.bottom.max(ROUTE_MARGIN),
+        left: covered.left + controls.left.max(ROUTE_MARGIN),
     }
+}
+
+/// A component's diff key from anything hashable, for `Component::render_key`.
+pub fn diff_key(parts: impl std::hash::Hash) -> DiffKey {
+    use std::hash::Hasher;
+    let mut hasher = std::hash::DefaultHasher::new();
+    parts.hash(&mut hasher);
+    DiffKey::U64(hasher.finish())
 }
 
 pub fn rgb_or(color: Option<u32>, fallback: Color) -> Color {
