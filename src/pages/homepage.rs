@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use freya::{icons::lucide, prelude::*};
 use map_component::{
     Insets, MapComponent, MapController, MapTap, TappedFeature, TappedLine, UserLocation,
-    util::viewport::lonlat_to_world,
+    util::viewport::{Viewport, lonlat_to_world, world_to_lonlat},
 };
 
 use super::{favorites::FavoritesPage, settings::SettingsPage};
@@ -217,8 +217,10 @@ impl Component for HomePage {
                         }
                     }),
             )
-            .child(ZoomBadge {
+            .child(ScaleBar {
                 zoom: controller.zoom,
+                center: controller.center,
+                viewport_size: controller.viewport_size,
             })
             .child(Attribution {})
             .child(LayersButton {
@@ -357,31 +359,90 @@ impl Component for PickBanner {
 /// Left edge of the picking banner: past the drawer (360 px) plus a margin.
 const PICK_BANNER_LEFT: f32 = 384.0;
 
-/// Current zoom level, bottom-left, as discreet as the attribution. Its own component so that reading `zoom` subscribes only this
-/// label: read from `HomePage::render`, every wheel tick would re-render `HomePage` and diff its
-/// whole tree, `MapComponent` included.
+/// Widest the scale bar may grow, in px.
+const SCALE_BAR_MAX_PX: f64 = 100.0;
+
+/// Earth's equatorial circumference in metres (the Web Mercator sphere).
+const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+
+/// Distance scale, bottom-left, as discreet as the attribution: a bar spanning a round distance
+/// (1, 2 or 5 × 10ⁿ m) measured at the bottom of the map, where it sits — Mercator stretches
+/// with latitude, so the scale holds along that row. Its own component so that reading `zoom`
+/// and `center` subscribes only this label: read from `HomePage::render`, every wheel tick would
+/// re-render `HomePage` and diff its whole tree, `MapComponent` included.
 #[derive(PartialEq)]
-struct ZoomBadge {
+struct ScaleBar {
     zoom: State<f32>,
+    center: State<CursorPoint>,
+    viewport_size: State<Area>,
 }
 
-impl Component for ZoomBadge {
+impl Component for ScaleBar {
     fn render(&self) -> impl IntoElement {
         let zoom = *self.zoom.read();
+        let center = *self.center.read();
+        let height = self.viewport_size.read().size.height;
         let screen = use_screen();
+
+        // The pixel-to-world mapping doesn't depend on which real zoom level is fetched, so any
+        // ceiling at or above the style's does.
+        let viewport = Viewport::new(center, zoom, 30);
+        let (world_x, world_y) = viewport.screen_to_world(0.0, height);
+        let (_, lat) = world_to_lonlat(world_x, world_y);
+        let metres_per_px = EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() / viewport.world_px();
+        let (metres, width) = scale_step(metres_per_px);
+
         rect()
             .position(Position::new_absolute().bottom(0.).left(0.))
             .layer(Layer::Overlay)
             // Above the Android navigation bar.
-            .padding((2.0, 8.0, 2.0 + screen.insets.bottom, 8.0))
+            .padding((2.0, 8.0, 4.0 + screen.insets.bottom, 8.0))
             .corner_radius((0.0f32, 6.0f32, 0.0f32, 0.0f32))
             .background(Color::from_argb(200, 255, 255, 255))
             .child(
                 label()
-                    .text(format!("z {zoom:.1}"))
+                    .text(distance_label(metres))
                     .font_size(11.0)
                     .color(Color::from_rgb(60, 60, 60)),
             )
+            .child(
+                rect()
+                    .width(Size::px(width))
+                    .height(Size::px(4.0))
+                    .border(
+                        Border::new()
+                            .fill(Color::from_rgb(60, 60, 60))
+                            .width(BorderWidth {
+                                top: 0.0,
+                                right: 1.5,
+                                bottom: 1.5,
+                                left: 1.5,
+                            })
+                            .alignment(BorderAlignment::Inner),
+                    ),
+            )
+    }
+}
+
+/// The longest round distance (1, 2 or 5 × 10ⁿ m) that fits in [`SCALE_BAR_MAX_PX`] at
+/// `metres_per_px`, and its width in px.
+fn scale_step(metres_per_px: f64) -> (f64, f32) {
+    let max_m = (metres_per_px * SCALE_BAR_MAX_PX).max(f64::MIN_POSITIVE);
+    let magnitude = 10f64.powf(max_m.log10().floor());
+    let metres = [5.0, 2.0, 1.0]
+        .into_iter()
+        .map(|step| step * magnitude)
+        .find(|m| *m <= max_m)
+        .unwrap_or(magnitude);
+    (metres, (metres / metres_per_px) as f32)
+}
+
+/// `metres` as the scale bar shows it: metres below a kilometre, kilometres from there.
+fn distance_label(metres: f64) -> String {
+    if metres >= 1000.0 {
+        format!("{} km", metres / 1000.0)
+    } else {
+        format!("{metres} m")
     }
 }
 

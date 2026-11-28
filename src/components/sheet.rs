@@ -27,7 +27,8 @@ pub enum Detent {
 const COLLAPSED_HEIGHT: f32 = 196.0;
 /// A drag shorter than this settles back where it started.
 const DRAG_SLOP: f32 = 40.0;
-/// Pulling the collapsed sheet down by more than this closes what it shows.
+/// Pulling the collapsed sheet down by more than this closes what it shows. From higher up, one
+/// swipe that carries the sheet below its collapsed height closes it too.
 const PULL_TO_CLOSE: f32 = 72.0;
 /// A press that moved further than this was a drag, not a tap.
 const TAP_SLOP: f32 = 8.0;
@@ -158,7 +159,8 @@ impl SheetState {
         let (mut drag, mut state) = (self.drag, self);
         rect()
             .width(Size::fill())
-            .padding((12.0f32, 0.0f32))
+            // Tall enough to grab, no taller: the header right under it is what matters.
+            .padding((10.0f32, 0.0f32, 8.0f32, 0.0f32))
             .center()
             .cursor(CursorIcon::Pointer)
             .on_pointer_down(move |e: Event<PointerEventData>| {
@@ -221,7 +223,8 @@ impl SheetState {
     }
 
     /// Ends a drag, settling the sheet on the detent nearest where it was let go, one at least
-    /// in the drag's direction. `on_close` runs for a pull down from the collapsed sheet. Wire as
+    /// in the drag's direction. `on_close` runs for a pull down from the collapsed sheet, or a
+    /// swipe from higher that lets it go below its collapsed height. Wire as
     /// a *capture* global pointer up: a drag's release then doesn't press what it ends over (a
     /// trip card, which would re-fit the map to the sheet as it was mid-drag).
     pub fn on_release(
@@ -269,6 +272,10 @@ impl SheetState {
             return Settle::Close;
         }
         let released = self.height(current) - offset;
+        // Swiped down past where the collapsed sheet would rest: gone, not lowered.
+        if current != Detent::Collapsed && released < self.height(Detent::Collapsed) {
+            return Settle::Close;
+        }
         let down = offset > 0.0;
         Detent::ALL
             .into_iter()

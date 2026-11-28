@@ -232,6 +232,8 @@ const TEXT: Color = Color::from_rgb(32, 33, 36);
 const TEXT_MUTED: Color = Color::from_rgb(95, 99, 104);
 const TEXT_FAINT: Color = Color::from_rgb(140, 144, 150);
 const ACCENT: Color = Color::from_rgb(26, 115, 232);
+/// A light wash of [`ACCENT`], behind its icons.
+const ACCENT_TINT: Color = Color::from_rgb(232, 240, 254);
 const DIVIDER: Color = Color::from_rgb(232, 234, 237);
 const SURFACE_ALT: Color = Color::from_rgb(244, 246, 248);
 const STAR: Color = Color::from_rgb(242, 153, 0);
@@ -279,6 +281,7 @@ impl Component for SearchPanel {
         let sheet_scroll = use_sheet_scroll();
         use_provide_context(move || sheet_scroll);
         use_sheet_reopens_at_half(sheet_state, places, transit);
+        use_sheet_at_half_after_typing(sheet_state, input_focus);
         use_sheet_follows_picking(sheet_state, transit);
         use_route_refit_on_settle(sheet_state, transit);
 
@@ -317,15 +320,23 @@ impl Component for SearchPanel {
             && !drawer_open
             && (input_focus().is_focused() || has_query || status != SearchStatus::Idle);
         let sheet = screen.compact && (drawer_open || searching);
+        // While typing, the search sheet stays at full height, closed by a pull down; once the
+        // search runs it rests on the drawer's detents, so it can be lowered to browse the
+        // results' pins and raised again — the box's ✕ closes it.
+        let typing = searching && input_focus().is_focused();
+        // Below full height a drag on the drawer's content moves the sheet, not the content.
+        let content_scrolls = !screen.compact || typing || sheet_state.content_scrolls();
         let dropdown = (!drawer_open && status != SearchStatus::Idle).then(|| {
             results_dropdown(
                 status,
                 results,
                 searching,
+                content_scrolls,
                 sheet_scroll,
                 map,
                 places,
                 search,
+                transit,
                 input_id,
             )
         });
@@ -434,8 +445,6 @@ impl Component for SearchPanel {
             );
         }
 
-        // Below full height a drag on the drawer's content moves the sheet, not the content.
-        let content_scrolls = !screen.compact || sheet_state.content_scrolls();
         let content: Vec<Element> = if planner_open {
             vec![Planner {}.into_element()]
         } else {
@@ -445,7 +454,7 @@ impl Component for SearchPanel {
                 (Some(place), None) if screen.compact => {
                     let mut places = places.clone();
                     let mut search = search.clone();
-                    vec![place_header(&place.title, move || {
+                    vec![place_header(&place.title, &place.subtitle, move || {
                         search.reset(String::new());
                         places.clear();
                     })]
@@ -535,11 +544,12 @@ impl Component for SearchPanel {
         map.viewport_size.read();
         // Typing takes the full height: at half height the keyboard hid the results. Once a
         // search runs (Enter, a chip) the box lets go of the keyboard and the sheet drops back
-        // to half height, uncovering the results' pins on the map above it.
-        let sheet_detent = match (searching, input_focus().is_focused()) {
-            (true, true) => Detent::Full,
-            (true, false) => Detent::Half,
-            (false, _) => sheet_state.detent(),
+        // to half height (see `use_sheet_at_half_after_typing`), uncovering the results' pins on
+        // the map above it; from there it moves between the detents like the drawer.
+        let sheet_detent = if typing {
+            Detent::Full
+        } else {
+            sheet_state.detent()
         };
         // What covers the map, for framing things on it (see `MapController::covered`).
         map.set_covered(if sheet {
@@ -555,7 +565,7 @@ impl Component for SearchPanel {
         } else {
             Insets::default()
         });
-        let panel = if searching {
+        let panel = if typing {
             bottom_sheet(screen, sheet_state.height(sheet_detent), pull.offset())
         } else if sheet {
             bottom_sheet(screen, sheet_state.height(sheet_detent), sheet_offset)
@@ -601,7 +611,7 @@ impl Component for SearchPanel {
                 }
             }
         };
-        let handle = if searching {
+        let handle = if typing {
             sheet_handle(pull, close_sheet.clone())
         } else if sheet {
             sheet_state.grab_bar(DIVIDER)
@@ -619,7 +629,7 @@ impl Component for SearchPanel {
                 close_sheet();
             }
         };
-        let panel = if searching {
+        let panel = if typing {
             panel
                 .on_pointer_down(pull.on_sheet_grab(sheet_scroll))
                 .on_global_pointer_move(pull.on_move())
@@ -662,17 +672,39 @@ impl Component for SearchPanel {
     }
 }
 
-/// Each time the drawer opens, its sheet starts at half height.
+/// Each time the drawer opens or closes, its sheet starts at half height: a place picked from
+/// the lowered search results doesn't open lowered, nor do the results come back lowered.
 fn use_sheet_reopens_at_half(
     mut sheet: SheetState,
     places: &PlaceController,
     transit: &TransitController,
 ) {
-    let (selected, view, planner_open) =
-        (places.selected_place, transit.view, transit.planner_open);
+    let (selected, view, planner_open, picking) = (
+        places.selected_place,
+        transit.view,
+        transit.planner_open,
+        transit.picking,
+    );
+    let mut was_open = use_state(|| false);
     use_side_effect(move || {
         let open = selected.read().is_some() || view.read().is_some() || *planner_open.read();
-        if !open {
+        if open == *was_open.peek() {
+            return;
+        }
+        was_open.set(open);
+        // A planner opening straight into picking a point is lowered by
+        // `use_sheet_follows_picking` instead.
+        if !(open && *planner_open.peek() && *picking.peek()) {
+            sheet.reset();
+        }
+    });
+}
+
+/// Typing in the search box holds the sheet at full height; when the search runs and the box
+/// lets go, the results sheet comes down to half height, whatever it was left at before.
+fn use_sheet_at_half_after_typing(mut sheet: SheetState, focus: Memo<Focus>) {
+    use_side_effect(move || {
+        if focus.read().is_focused() {
             sheet.reset();
         }
     });
@@ -875,10 +907,12 @@ fn results_dropdown(
     status: SearchStatus,
     results: Vec<SearchResult>,
     fill: bool,
+    content_scrolls: bool,
     scroll: SheetScroll,
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
+    transit: &TransitController,
     input_id: AccessibilityId,
 ) -> Element {
     let sprites = map.sprites.read().clone();
@@ -896,6 +930,29 @@ fn results_dropdown(
             (lat, lon)
         });
     let body = if !results.is_empty() {
+        let count = results.len();
+        let rows = results.into_iter().enumerate().flat_map(|(index, result)| {
+            let row = result_row(
+                result,
+                origin,
+                sprites.as_deref(),
+                map,
+                places,
+                search,
+                transit,
+                input_id,
+            )
+            .into_element();
+            // Inset to the text, under the icon column: the rows read as one list.
+            let divider = (index > 0).then(|| {
+                rect()
+                    .width(Size::fill())
+                    .padding((0.0, 0.0, 0.0, RESULT_TEXT_INSET))
+                    .child(divider())
+                    .into_element()
+            });
+            divider.into_iter().chain(std::iter::once(row))
+        });
         scroll
             .track(ScrollView::new())
             // `ScrollView` defaults to `height: fill()`, which resolves to nothing inside this
@@ -903,20 +960,20 @@ fn results_dropdown(
             // capped by `max_height`.
             .height(if fill { Size::fill() } else { Size::auto() })
             .maybe(!fill, |r| r.max_height(Size::px(RESULTS_MAX_HEIGHT)))
+            .drag_scrolling(content_scrolls)
             .direction(Direction::vertical())
             .child(scroll.marker())
-            .children(results.into_iter().map(|result| {
-                result_row(
-                    result,
-                    origin,
-                    sprites.as_deref(),
-                    map,
-                    places,
-                    search,
-                    input_id,
-                )
-                .into_element()
-            }))
+            .child(
+                label()
+                    .text(match count {
+                        1 => "1 place".to_string(),
+                        n => format!("{n} places · nearest first"),
+                    })
+                    .font_size(text_size(12.0))
+                    .color(TEXT_FAINT)
+                    .margin((8.0f32, 4.0f32, 2.0f32, 4.0f32)),
+            )
+            .children(rows)
             .into_element()
     } else {
         let (svg, text) = match status {
@@ -952,6 +1009,14 @@ fn results_dropdown(
         .into_element()
 }
 
+/// Where a result row's text starts: its icon disc and the gap after it.
+const RESULT_TEXT_INSET: f32 = 4.0 + RESULT_DISC + 12.0;
+/// Diameter of the tinted disc behind a result's icon.
+const RESULT_DISC: f32 = 36.0;
+
+/// One search result: its kind's icon on a tinted disc; the name; what it is and how far; the
+/// address (without the name again); and a Directions shortcut — the one thing most often done
+/// with a place found in a list, without opening it first.
 #[allow(clippy::too_many_arguments)]
 fn result_row(
     result: SearchResult,
@@ -960,24 +1025,53 @@ fn result_row(
     map: &MapController,
     places: &PlaceController,
     search: &SearchController,
+    transit: &TransitController,
     input_id: AccessibilityId,
 ) -> impl IntoElement {
     let title = result.title().to_string();
-    let subtitle = [humanize(&result.category), result.display_name.clone()]
-        .into_iter()
-        .filter(|part| !part.is_empty() && *part != title)
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let address = address_of(&result);
+    let kind = humanize(&result.category);
     let distance = search::format_distance(search::distance_m(
         origin_lat, origin_lon, result.lat, result.lon,
     ));
-    let icon = poi_icon(
+    let facts = [kind, distance]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let kind_icon = poi_icon(
         sprites,
         &result.category,
         Some(&result.osm_key),
         ICON_SIZE,
-        TEXT_MUTED,
+        ACCENT,
     );
+
+    let directions = {
+        let mut transit = transit.clone();
+        let to = Endpoint {
+            name: title.clone(),
+            lat: result.lat,
+            lon: result.lon,
+        };
+        rect()
+            .width(Size::px(40.0))
+            .height(Size::px(40.0))
+            .corner_radius(20.0f32)
+            .center()
+            .cursor(CursorIcon::Pointer)
+            .background(ACCENT_TINT)
+            // The row is a button too: this press is the shortcut's, not the row's.
+            .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
+            .on_press(move |e: Event<PressEventData>| {
+                e.stop_propagation();
+                e.prevent_default();
+                haptic(Haptic::Press);
+                input_id.request_unfocus();
+                transit.open_planner(Some(to.clone()));
+            })
+            .child(icon(lucide::route(), ACCENT))
+    };
 
     let map = map.clone();
     let mut places = places.clone();
@@ -998,38 +1092,66 @@ fn result_row(
                 .width(Size::fill())
                 .cross_align(Alignment::Center)
                 .spacing(12.0)
-                .padding((tap_padding(6.0), 4.0))
-                .child(icon)
+                .padding((tap_padding(8.0), 0.0))
+                .child(
+                    rect()
+                        .width(Size::px(RESULT_DISC))
+                        .height(Size::px(RESULT_DISC))
+                        .corner_radius(RESULT_DISC / 2.0)
+                        .center()
+                        .background(ACCENT_TINT)
+                        .child(kind_icon),
+                )
                 .child(
                     rect()
                         .vertical()
                         .width(Size::flex(1.0))
+                        .spacing(2.0)
                         .child(
                             label()
                                 .text(title)
-                                .font_size(text_size(14.0))
+                                .font_size(text_size(15.0))
+                                .font_weight(FontWeight::MEDIUM)
                                 .color(TEXT)
                                 .max_lines(1)
                                 .text_overflow(TextOverflow::Ellipsis),
                         )
-                        .maybe(!subtitle.is_empty(), |r| {
+                        .maybe(!facts.is_empty(), |r| {
                             r.child(
                                 label()
-                                    .text(subtitle)
-                                    .font_size(text_size(12.0))
+                                    .text(facts)
+                                    .font_size(text_size(13.0))
                                     .color(TEXT_MUTED)
+                                    .max_lines(1)
+                                    .text_overflow(TextOverflow::Ellipsis),
+                            )
+                        })
+                        .maybe(!address.is_empty(), |r| {
+                            r.child(
+                                label()
+                                    .text(address)
+                                    .font_size(text_size(13.0))
+                                    .color(TEXT_FAINT)
                                     .max_lines(1)
                                     .text_overflow(TextOverflow::Ellipsis),
                             )
                         }),
                 )
-                .child(
-                    label()
-                        .text(distance)
-                        .font_size(text_size(12.0))
-                        .color(TEXT_FAINT),
-                ),
+                .child(directions),
         )
+}
+
+/// `result`'s address line: its `display_name` without the name it starts with, which the row
+/// already shows as its title. Empty for a bare address (its title *is* the address).
+fn address_of(result: &SearchResult) -> String {
+    if result.name.is_empty() {
+        return String::new();
+    }
+    let line = result.display_name.as_str();
+    line.strip_prefix(result.name.as_str())
+        .map(|rest| rest.trim_start_matches([',', ' ']))
+        .unwrap_or(line)
+        .to_string()
 }
 
 /// Shows a search result: the map centred on it, its details in the drawer.
@@ -1466,7 +1588,8 @@ fn place_details(
             )
             .into_element()
     });
-    if !subtitle.is_empty() {
+    // On a phone the sheet's header shows it, under the name (see `place_header`).
+    if !subtitle.is_empty() && !compact {
         body.push(
             rect()
                 .padding((4.0f32, 10.0f32))
@@ -1779,23 +1902,44 @@ fn is_about_row(key: &str) -> bool {
 }
 
 /// The bottom sheet's head for a place: its name in full (up to three lines) and a ✕.
-fn place_header(title: &str, mut on_close: impl FnMut() + 'static) -> Element {
+fn place_header(title: &str, subtitle: &str, mut on_close: impl FnMut() + 'static) -> Element {
+    // An unnamed place (a bus stop, a bench) is titled by its kind rather than leaving the
+    // header to the ✕ alone.
+    let (title, subtitle) = match (title.trim().is_empty(), subtitle.trim().is_empty()) {
+        (true, false) => (subtitle, ""),
+        _ => (title, subtitle),
+    };
     rect()
         .horizontal()
         .content(Content::flex())
         .width(Size::fill())
         .cross_align(Alignment::Center)
         .spacing(8.0)
-        .padding((4.0f32, 4.0f32, 8.0f32, 4.0f32))
+        .padding((0.0f32, 4.0f32, 8.0f32, 4.0f32))
         .child(
-            label()
-                .text(title.to_string())
+            rect()
+                .vertical()
                 .width(Size::flex(1.0))
-                .font_size(text_size(20.0))
-                .font_weight(FontWeight::BOLD)
-                .color(TEXT)
-                .max_lines(3)
-                .text_overflow(TextOverflow::Ellipsis),
+                .spacing(2.0)
+                .child(
+                    label()
+                        .text(title.to_string())
+                        .font_size(text_size(20.0))
+                        .font_weight(FontWeight::BOLD)
+                        .color(TEXT)
+                        .max_lines(3)
+                        .text_overflow(TextOverflow::Ellipsis),
+                )
+                .maybe(!subtitle.is_empty(), |r| {
+                    r.child(
+                        label()
+                            .text(subtitle.to_string())
+                            .font_size(text_size(14.0))
+                            .color(TEXT_MUTED)
+                            .max_lines(1)
+                            .text_overflow(TextOverflow::Ellipsis),
+                    )
+                }),
         )
         .child(
             rect()
