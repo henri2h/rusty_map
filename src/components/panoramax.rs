@@ -226,7 +226,7 @@ impl Component for StreetPhotos {
                     match fetch_photos(lat, lon, picture).await {
                         Ok(found) if !found.is_empty() => {
                             photos.set(found);
-                            platform.send(UserEvent::RequestRedraw);
+                            platform.request_redraw();
                         }
                         Ok(_) => {}
                         Err(err) => log::debug!("[panoramax] lookup failed: {err:?}"),

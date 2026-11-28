@@ -166,7 +166,7 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
             let new_hover = is_over_icon.then_some(pos);
             if *hovered_screen.borrow() != new_hover {
                 *hovered_screen.borrow_mut() = new_hover;
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
             return;
         }
@@ -210,7 +210,7 @@ pub fn build_on_mouse_move(s: &MapInputState) -> impl FnMut(Event<MouseEventData
             // fetch, so no `RequestRedraw` from `fetch_tile_if_new`'s completion callback)
             // would otherwise silently update `center` with nothing telling freya to
             // actually repaint.
-            platform.send(UserEvent::RequestRedraw);
+            platform.request_redraw();
         }
     }
 }
@@ -279,7 +279,7 @@ pub fn build_on_global_pointer_up(
                 initial.x - center_delta.x,
                 initial.y - center_delta.y,
             )));
-            platform.send(UserEvent::RequestRedraw);
+            platform.request_redraw();
             return;
         }
 
@@ -596,7 +596,7 @@ pub fn build_on_touch(
             &platform,
         );
         // The paint closure only `peek`s the view (see `build_on_mouse_move`).
-        platform.send(UserEvent::RequestRedraw);
+        platform.request_redraw();
     }
 }
 
@@ -658,7 +658,7 @@ pub fn build_on_wheel(s: &MapInputState) -> impl FnMut(Event<WheelEventData>) + 
         // Same as panning: the paint closure only `peek`s `zoom`/`center`. (The canvas used to be
         // re-keyed by zoom to force this instead, which rebuilt the element on every wheel tick —
         // dropping its pointer/hover state, so a pan started right after zooming didn't register.)
-        platform.send(UserEvent::RequestRedraw);
+        platform.request_redraw();
     }
 }
 

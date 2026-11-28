@@ -306,7 +306,7 @@ impl Component for EndpointField {
                     background_delay(SEARCH_DEBOUNCE).await;
                     if let Ok(list) = search::search_address(text, bias).await {
                         results.set(list.into_iter().take(5).collect());
-                        platform.send(UserEvent::RequestRedraw);
+                        platform.request_redraw();
                     }
                 })));
             }
@@ -516,7 +516,7 @@ impl Component for Itineraries {
                             state.set(PlanLoad::Failed);
                         }
                     }
-                    map.platform.send(UserEvent::RequestRedraw);
+                    map.platform.request_redraw();
                 });
             }
         });

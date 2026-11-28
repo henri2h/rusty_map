@@ -427,7 +427,7 @@ fn ensure_cell_baked_one(
         match image {
             Some(image) => {
                 cells.put(cache_key, ZoomDepState::Ready(image));
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
             None => {
                 cells.pop(&cache_key);
@@ -493,7 +493,7 @@ fn ensure_zoom_dep_baked_one(
         match image {
             Some(image) => {
                 entries.put(cache_key, ZoomDepState::Ready(image));
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
             // Skipped as obsolete: forget the `Pending` marker so returning to this bucket later
             // bakes it for real.
@@ -785,7 +785,7 @@ fn fetch_tile_if_new(
         };
 
         store_tile(&tile_cache, key, state);
-        platform.send(UserEvent::RequestRedraw);
+        platform.request_redraw();
 
         // Retry by itself while the view still wants it: otherwise it stayed blank until the
         // view moved again.

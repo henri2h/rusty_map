@@ -1078,7 +1078,7 @@ pub fn fly_to(map: &MapController, lat: f64, lon: f64) {
     zoom.set(target_zoom);
     // `zoom` may end up unchanged (e.g. picking another result while already at the cap), so
     // the canvas's `.key()` alone can't be relied on to force a repaint.
-    map.platform.send(UserEvent::RequestRedraw);
+    map.platform.request_redraw();
 }
 
 /// Saved places under the idle search pill: one tap shows the place.
@@ -1242,7 +1242,7 @@ fn search_visible<Fut>(
                 status.set(SearchStatus::Failed);
             }
         }
-        platform.send(UserEvent::RequestRedraw);
+        platform.request_redraw();
     });
     search.task.set(Some(handle));
 }
@@ -1340,7 +1340,7 @@ fn build_on_search_input(
                             {
                                 results.set(list);
                                 quick = true;
-                                platform.send(UserEvent::RequestRedraw);
+                                platform.request_redraw();
                             }
                             None
                         }
@@ -1357,7 +1357,7 @@ fn build_on_search_input(
                     log::warn!("[search] Photon failed, keeping IGN results: {err:?}");
                 }
                 status.set(SearchStatus::Done);
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
                 return;
             }
             match found {
@@ -1371,7 +1371,7 @@ fn build_on_search_input(
                     status.set(SearchStatus::Failed);
                 }
             }
-            platform.send(UserEvent::RequestRedraw);
+            platform.request_redraw();
         });
         search.task.set(Some(handle));
     }
@@ -2028,12 +2028,15 @@ impl Component for CoordinatesRow {
                 .vertical()
                 .width(Size::fill())
                 .cursor(CursorIcon::Pointer)
-                .on_press(
-                    move |_: Event<PressEventData>| match Clipboard::set(value.clone()) {
-                        Ok(()) => copied.set(true),
-                        Err(err) => log::warn!("[place] copy failed: {err:?}"),
-                    },
-                )
+                .on_press(move |_: Event<PressEventData>| {
+                    let write = Clipboard::set_text(value.clone());
+                    spawn(async move {
+                        match write.await {
+                            Ok(()) => copied.set(true),
+                            Err(err) => log::warn!("[place] copy failed: {err:?}"),
+                        }
+                    });
+                })
                 .child(
                     label()
                         .text(self.value.clone())

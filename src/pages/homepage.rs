@@ -85,7 +85,7 @@ impl Component for HomePage {
                 let world = selected.read().as_ref().and_then(|p| p.marker_world);
                 if *marker.peek() != world {
                     marker.set(world);
-                    platform.send(UserEvent::RequestRedraw);
+                    platform.request_redraw();
                 }
             }
         });

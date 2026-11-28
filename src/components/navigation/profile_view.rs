@@ -221,7 +221,9 @@ fn draw(
     }
     let x = |along: f64| (along / length) as f32 * width;
     let y = |z: f64| ((high - z) / (high - low)) as f32 * height;
-    let canvas = context.canvas;
+    let RenderTarget::Background { canvas, .. } = &context.target else {
+        return;
+    };
 
     // Recessive grid: hairlines at the top, middle and bottom.
     let mut grid = Paint::default();

@@ -86,7 +86,7 @@ impl Component for WalkRoute {
                             state.set(Load::Failed);
                         }
                     }
-                    map.platform.send(UserEvent::RequestRedraw);
+                    map.platform.request_redraw();
                 });
             }
         });

@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-freya = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", features = [
+freya = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased", features = [
   "engine",
 ] }
-torin = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
-freya-skia-safe = "0.104.0"
+torin = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased" }
+freya-skia-safe = "0.105.0-beta.5"
 
 mvt-reader = "2.4.0"
 geo-types = "0.7"

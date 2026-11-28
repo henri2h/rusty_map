@@ -25,6 +25,14 @@ use super::util::{
 /// `last_pan_update` in `map_input`).
 pub const FRAME_BUDGET: time::Duration = time::Duration::from_millis(16);
 
+/// The canvas of a rect background's paint callback (the only kind the map paints in).
+pub(crate) fn canvas_of<'a>(context: &'a FillRenderContext) -> &'a freya::engine::prelude::Canvas {
+    match &context.target {
+        RenderTarget::Background { canvas, .. } => canvas,
+        RenderTarget::TextStyle(_) => unreachable!("the map paints a rect background"),
+    }
+}
+
 /// Draws one full frame: background, then every visible tile — compiled bitmap plus its baked
 /// line overlay, over-zoom cells, or ancestor placeholder, whichever the tile's state allows —
 /// then labels. Read-only over the caches (aside from LRU recency bookkeeping); anything that
@@ -54,7 +62,7 @@ pub fn paint_map(
         if let StyleLayer::Background(bg) = layer {
             let mut paint = Paint::default();
             paint.set_color(bg.color);
-            context.canvas.draw_rect(
+            canvas_of(context).draw_rect(
                 Rect::from_wh(context.size.width, context.size.height),
                 &paint,
             );
@@ -96,8 +104,8 @@ pub fn paint_map(
             let (screen_x, screen_y) = viewport.screen_pos(tile_x, tile_y);
             let time_start_tile = time::Instant::now();
 
-            context.canvas.save();
-            context.canvas.translate((screen_x, screen_y));
+            canvas_of(context).save();
+            canvas_of(context).translate((screen_x, screen_y));
 
             let mut path_tag = "none";
             // Per-phase timing so a slow tile can be attributed: the main draw (blit/replay) vs
@@ -233,7 +241,7 @@ pub fn paint_map(
                 }
             }
 
-            context.canvas.restore();
+            canvas_of(context).restore();
             bare_cells += cell_stats.map_or(0, |c| c.bare);
 
             let tile_time = time_start_tile.elapsed();
@@ -269,7 +277,7 @@ pub fn paint_map(
     // Trip/journey overlay: over the tiles, under the labels so stop and street names stay
     // readable.
     if let Some(overlay) = route_overlay {
-        crate::overlay::draw_overlay(context.canvas, overlay, &viewport);
+        crate::overlay::draw_overlay(canvas_of(context), overlay, &viewport);
     }
 
     // Label pass: screen-space text over the finished tiles. `drop(cache)` first — the pass
@@ -331,7 +339,7 @@ pub fn paint_map(
         .collect();
     let mut animator = label_animator.borrow_mut();
     let placed = labels::draw_labels(
-        context.canvas,
+        canvas_of(context),
         style,
         candidates,
         zoom,
@@ -345,7 +353,7 @@ pub fn paint_map(
     // Fades in flight need further frames — keep repainting until they settle (opacities clamp,
     // so this always terminates).
     if animator.is_animating() {
-        platform.send(UserEvent::RequestRedraw);
+        platform.request_redraw();
     }
     drop(animator);
 
@@ -369,8 +377,7 @@ pub fn paint_map(
         halo_paint.set_color(Color::from_argb(180, 66, 62, 82));
         halo_paint.set_anti_alias(true);
         let center = (hit.rect.center_x(), hit.rect.center_y());
-        context
-            .canvas
+        canvas_of(context)
             .draw_circle(center, labels::ICON_PIN_RADIUS_PX + 3.0, &halo_paint);
     }
 
@@ -417,8 +424,7 @@ fn draw_search_pin(context: &mut FillRenderContext, screen_x: f32, screen_y: f32
     let mut fill = Paint::default();
     fill.set_anti_alias(true);
     fill.set_color(Color::from_rgb(217, 48, 37));
-    context
-        .canvas
+    canvas_of(context)
         .draw_circle((screen_x, screen_y - RADIUS), RADIUS, &fill);
 
     let mut point = freya::engine::prelude::PathBuilder::new();
@@ -426,13 +432,12 @@ fn draw_search_pin(context: &mut FillRenderContext, screen_x: f32, screen_y: f32
     point.line_to((screen_x + RADIUS * 0.62, screen_y - RADIUS * 0.55));
     point.line_to((screen_x, screen_y + RADIUS * 0.7));
     point.close();
-    context.canvas.draw_path(&point.detach(), &fill);
+    canvas_of(context).draw_path(&point.detach(), &fill);
 
     let mut hole = Paint::default();
     hole.set_anti_alias(true);
     hole.set_color(Color::WHITE);
-    context
-        .canvas
+    canvas_of(context)
         .draw_circle((screen_x, screen_y - RADIUS), RADIUS * 0.4, &hole);
 }
 
@@ -506,8 +511,8 @@ fn draw_cells(
     let viewport_size = Size2D::new(context.size.width, context.size.height);
     for (cx, cy) in visible_cells(screen_x, screen_y, tile_px, level, viewport_size) {
         let dest = Rect::from_xywh(cx as f32 * cell, cy as f32 * cell, cell, cell);
-        context.canvas.save();
-        context.canvas.clip_rect(dest, None, None);
+        canvas_of(context).save();
+        canvas_of(context).clip_rect(dest, None, None);
         match cell_lookup(zoom_dep_cache, key, bucket, level, cx, cy) {
             Some(hit) => {
                 if hit.level < level {
@@ -554,14 +559,14 @@ fn draw_cells(
                 }
             }
         }
-        context.canvas.restore();
+        canvas_of(context).restore();
     }
     stats
 }
 
 /// Draws `image` stretched into `dest`, with linear sampling.
 fn draw_image_at(context: &mut FillRenderContext, image: &Image, dest: Rect, paint: &Paint) {
-    context.canvas.draw_image_rect_with_sampling_options(
+    canvas_of(context).draw_image_rect_with_sampling_options(
         image,
         None,
         dest,
@@ -600,8 +605,8 @@ fn draw_loaded_descendants(
     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
         let child = (z + 1, 2 * x + dx, 2 * y + dy);
         let (ox, oy) = (dx as f32 * half, dy as f32 * half);
-        context.canvas.save();
-        context.canvas.translate((ox, oy));
+        canvas_of(context).save();
+        canvas_of(context).translate((ox, oy));
         // `get`, not `peek`: a stand-in on screen counts as used, so it isn't evicted first.
         if let Some(TileState::Loaded(tile)) = cache.get(&child).cloned() {
             blit_tile_image(context, &tile.image, half, paint);
@@ -627,7 +632,7 @@ fn draw_loaded_descendants(
                 label_tiles.as_deref_mut(),
             );
         }
-        context.canvas.restore();
+        canvas_of(context).restore();
     }
     drew
 }
@@ -635,7 +640,7 @@ fn draw_loaded_descendants(
 /// Blits a tile bitmap stretched to the tile's current on-screen size, with linear sampling so
 /// continuous zoom's fractional scaling stays smooth rather than blocky.
 fn blit_tile_image(context: &mut FillRenderContext, image: &Image, tile_px: f32, paint: &Paint) {
-    context.canvas.draw_image_rect_with_sampling_options(
+    canvas_of(context).draw_image_rect_with_sampling_options(
         image,
         None,
         Rect::from_wh(tile_px, tile_px),
@@ -666,16 +671,15 @@ fn draw_ancestor_fallback(
     let offset_x = (tile_x & mask) as f32 * tile_px;
     let offset_y = (tile_y & mask) as f32 * tile_px;
 
-    context.canvas.save();
-    context
-        .canvas
+    canvas_of(context).save();
+    canvas_of(context)
         .clip_rect(Rect::from_wh(tile_px, tile_px), None, None);
-    context.canvas.draw_image_rect_with_sampling_options(
+    canvas_of(context).draw_image_rect_with_sampling_options(
         image,
         None,
         Rect::from_xywh(-offset_x, -offset_y, full_size, full_size),
         SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
         paint,
     );
-    context.canvas.restore();
+    canvas_of(context).restore();
 }

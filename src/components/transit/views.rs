@@ -86,7 +86,7 @@ impl Component for TrackView {
                             state.set(Load::Failed);
                         }
                     }
-                    map.platform.send(UserEvent::RequestRedraw);
+                    map.platform.request_redraw();
                 });
             }
         });
@@ -283,7 +283,7 @@ impl Component for LineView {
                             state.set(Load::Failed);
                         }
                     }
-                    map.platform.send(UserEvent::RequestRedraw);
+                    map.platform.request_redraw();
                 });
             }
         });
@@ -506,7 +506,7 @@ impl Component for TripView {
                             state.set(Load::Failed);
                         }
                     }
-                    map.platform.send(UserEvent::RequestRedraw);
+                    map.platform.request_redraw();
                 });
             }
         });

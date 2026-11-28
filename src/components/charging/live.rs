@@ -62,7 +62,7 @@ impl Component for ChargerLive {
                         };
                         if *state.peek() != next {
                             state.set(next);
-                            platform.send(UserEvent::RequestRedraw);
+                            platform.request_redraw();
                         }
                         if matches!(*state.peek(), Load::Unknown) {
                             return;

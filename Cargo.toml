@@ -51,19 +51,19 @@ perf-overlay = ["dep:freya-metrics-plugin"]
 
 [dependencies]
 
-freya = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", features = [
+freya = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased", features = [
   "engine",
   "material-design",
   "icons",
 ] }
 
-freya-icons = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", features = [
+freya-icons = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased", features = [
   "lucide",
 ] }
 map_component = { path = "crates/map_component" }
-freya-router = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
-torin = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
-freya-metrics-plugin = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review", optional = true }
+freya-router = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased" }
+torin = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased" }
+freya-metrics-plugin = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased", optional = true }
 
 mvt-reader = "2.4.0"
 geo-types = "0.7"
@@ -86,10 +86,10 @@ dirs = "6"
 env_logger = "0.11"
 
 [target.'cfg(target_os = "android")'.dependencies]
-freya-android = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
-freya-winit = { git = "https://github.com/henri2h/freya", branch = "henri2h/changes-to-review" }
+freya-android = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased" }
+freya-winit = { git = "https://github.com/henri2h/freya", branch = "henri2h/rebased" }
 android_logger = "0.15"
 # Calls into `MainActivity`: location updates, haptics (see `src/mobile.rs`).
 jni = "0.21"
-winit = { version = "0.30", features = ["android-native-activity", "rwh_06"] }
+winit = { version = "0.31.0-beta.4", features = ["android-native-activity"] }
 robius-location = { git = "https://github.com/project-robius/robius" }

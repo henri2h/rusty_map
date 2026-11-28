@@ -84,7 +84,7 @@ impl Component for ChargerLayer {
                                 log::info!("[chargers] {} fast chargers", fresh.len());
                                 list.set(Rc::new(fresh));
                                 etag.set(tag);
-                                platform.send(UserEvent::RequestRedraw);
+                                platform.request_redraw();
                             }
                             Ok(None) => {}
                             Err(err) => log::warn!("[chargers] list failed: {err:?}"),

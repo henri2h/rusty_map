@@ -325,7 +325,7 @@ impl PlaceController {
             }
             updated.apply(enriched);
             selected.set(Some(updated));
-            platform.send(UserEvent::RequestRedraw);
+            platform.request_redraw();
         });
     }
 }

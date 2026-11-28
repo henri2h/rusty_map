@@ -64,7 +64,7 @@ fn android_main(droid_app: winit::platform::android::activity::AndroidApp) {
         }
     }
 
-    let event_loop = EventLoop::<NativeEvent>::with_user_event()
+    let event_loop = EventLoop::builder()
         .with_android_app(droid_app.clone())
         .build()
         .expect("Failed to build event loop");

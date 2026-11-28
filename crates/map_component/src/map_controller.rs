@@ -167,28 +167,28 @@ impl MapController {
     /// Replaces the drawn overlay and repaints.
     pub fn set_route_overlay(&mut self, overlay: Option<RouteOverlay>) {
         self.route_overlay.set(overlay.map(Rc::new));
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// Moves the device position dot and repaints.
     pub fn set_user_location(&mut self, location: Option<UserLocation>) {
         if *self.user_location.peek() != location {
             self.user_location.set(location);
-            self.platform.send(UserEvent::RequestRedraw);
+            self.platform.request_redraw();
         }
     }
 
     /// Replaces the drawn markers and repaints.
     pub fn set_markers(&mut self, markers: Option<MarkerSet>) {
         self.markers.set(markers.map(Rc::new));
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// Replaces the drawn search result pins and repaints, unless unchanged.
     pub fn set_pins(&mut self, pins: Option<MarkerSet>) {
         if self.pins.peek().as_deref() != pins.as_ref() {
             self.pins.set(pins.map(Rc::new));
-            self.platform.send(UserEvent::RequestRedraw);
+            self.platform.request_redraw();
         }
     }
 
@@ -201,19 +201,19 @@ impl MapController {
             None => layers.push(layer),
         }
         drop(layers);
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// Removes the layer with `id` and repaints.
     pub fn remove_layer(&mut self, id: u64) {
         self.layers.write().retain(|layer| layer.id != id);
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// Removes every layer and repaints.
     pub fn clear_layers(&mut self) {
         self.layers.set(Vec::new());
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// Records what the host's UI covers of the map (a drawer down one side, a bottom sheet), so
@@ -234,7 +234,7 @@ impl MapController {
         let (center, zoom) = self.fit_target(bounds, insets, max_zoom);
         self.center.set(center);
         self.zoom.set(zoom);
-        self.platform.send(UserEvent::RequestRedraw);
+        self.platform.request_redraw();
     }
 
     /// [`Self::fit_world_bounds`], gliding there (see [`Self::glide_to`]).
@@ -355,7 +355,7 @@ impl MapController {
                 center_state.set(frame.0);
                 zoom_state.set(frame.1);
                 shown = frame;
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
                 if done {
                     return;
                 }

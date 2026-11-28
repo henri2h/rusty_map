@@ -128,7 +128,8 @@ pub fn share(subject: &str, text: &str) -> bool {
     #[cfg(not(target_os = "android"))]
     {
         let _ = subject;
-        Clipboard::set(text.to_string()).is_ok()
+        Clipboard::set_text_deferred(text.to_string());
+        true
     }
 }
 

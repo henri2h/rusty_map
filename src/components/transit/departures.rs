@@ -127,7 +127,7 @@ impl Component for DepartureBoard {
                         };
                         if *state.peek() != next {
                             state.set(next);
-                            platform.send(UserEvent::RequestRedraw);
+                            platform.request_redraw();
                         }
                         if matches!(*state.peek(), Load::NoStop) {
                             return;
@@ -437,7 +437,7 @@ impl Component for NextTimes {
                         };
                         if *state.peek() != next {
                             state.set(next);
-                            platform.send(UserEvent::RequestRedraw);
+                            platform.request_redraw();
                         }
                         background_delay(REFRESH_EVERY).await;
                     }

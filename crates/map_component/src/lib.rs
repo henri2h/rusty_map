@@ -34,7 +34,7 @@ use map_input::{
     MapInputState, TouchGesture, build_on_global_pointer_up, build_on_mouse_move,
     build_on_pointer_down, build_on_touch, build_on_wheel,
 };
-use map_paint::paint_map;
+use map_paint::{canvas_of, paint_map};
 use map_style_loader::load_style;
 
 pub struct MapComponent {
@@ -127,7 +127,7 @@ impl MapComponent {
 }
 
 impl LayoutExt for MapComponent {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -215,7 +215,7 @@ impl Component for MapComponent {
                     &active,
                     &platform,
                 );
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
         };
 
@@ -256,7 +256,7 @@ impl Component for MapComponent {
                     &style.borrow(),
                     &platform,
                 );
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
         });
 
@@ -315,7 +315,7 @@ impl Component for MapComponent {
                         let sheet = Rc::new(sheet);
                         *sheet_slot.borrow_mut() = Some(sheet.clone());
                         sheet_state.set(Some(sheet));
-                        platform.send(UserEvent::RequestRedraw);
+                        platform.request_redraw();
                     }
                     Err(err) => log::warn!("[sprites] load failed, no icons: {err:?}"),
                 }
@@ -402,7 +402,7 @@ impl Component for MapComponent {
                                 style_now.max_real_zoom,
                             );
                             overlay::draw_layers(
-                                context.canvas,
+                                canvas_of(context),
                                 &layers,
                                 &viewport,
                                 (context.size.width, context.size.height),
@@ -417,7 +417,7 @@ impl Component for MapComponent {
                                 style_now.max_real_zoom,
                             );
                             overlay::draw_markers(
-                                context.canvas,
+                                canvas_of(context),
                                 &markers,
                                 &viewport,
                                 *zoom.peek(),
@@ -431,7 +431,7 @@ impl Component for MapComponent {
                                 *zoom.peek(),
                                 style_now.max_real_zoom,
                             );
-                            overlay::draw_user_location(context.canvas, &location, &viewport);
+                            overlay::draw_user_location(canvas_of(context), &location, &viewport);
                         }
                     }))
                 };
